@@ -1,0 +1,61 @@
+"""Pydantic 数据模型统一导出。"""
+
+from .diagnosis import (
+    BUY_ACTIONS,
+    REDEEM_ACTIONS,
+    Action,
+    ActionItem,
+    CandidateAnalysis,
+    CandidateRequest,
+    CapitalDiagnosis,
+    ConcentrationDiagnosis,
+    ConcentrationItem,
+    DiagnosisReport,
+    HoldingSnapshot,
+    LLMSynthesis,
+    PortfolioSummary,
+    Settlement,
+    Severity,
+    Signal,
+)
+from .fund import FundBasicInfo, FundRiskClass, normalize_fund_type
+from .portfolio import (
+    DEFAULT_TARGET_ALLOCATION,
+    FundType,
+    Holding,
+    Portfolio,
+    RiskTolerance,
+    Strategy,
+    TargetAllocation,
+)
+from .settings import Settings
+
+__all__ = [
+    "BUY_ACTIONS",
+    "REDEEM_ACTIONS",
+    "Action",
+    "ActionItem",
+    "CandidateAnalysis",
+    "CandidateRequest",
+    "CapitalDiagnosis",
+    "ConcentrationDiagnosis",
+    "ConcentrationItem",
+    "DEFAULT_TARGET_ALLOCATION",
+    "DiagnosisReport",
+    "FundBasicInfo",
+    "FundRiskClass",
+    "FundType",
+    "Holding",
+    "HoldingSnapshot",
+    "LLMSynthesis",
+    "Portfolio",
+    "PortfolioSummary",
+    "RiskTolerance",
+    "Settings",
+    "Settlement",
+    "Severity",
+    "Signal",
+    "Strategy",
+    "TargetAllocation",
+    "normalize_fund_type",
+]

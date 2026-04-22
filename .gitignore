@@ -1,0 +1,30 @@
+# env
+.env
+.env.local
+
+# data
+data/*.db
+data/cache/
+config/*.backup-*
+config/*.bak
+
+# python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# venv
+.venv/
+# 注意：uv.lock 要提交以复现环境
+
+# streamlit
+.streamlit/secrets.toml
+
+# IDE
+.idea/
+.vscode/

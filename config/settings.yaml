@@ -1,0 +1,71 @@
+# 策略参数与阈值。所有数值都可在这里调整，无需改代码。
+
+concentration_caps:
+  high_volatility: 0.15    # 北交所 / 行业主题
+  broad_index: 0.30        # 沪深 300 / 中证 500 等宽基
+  bond: 0.40
+  money: 1.00              # 不限
+  unknown: 0.15            # 未匹配走保守上限
+
+concentration_keywords:
+  # 高波动关键词优先判定（命中即归为 15% 上限）
+  high_volatility:
+    - 北证
+    - 北交所
+    - 科创
+    - 行业
+    - 主题
+    - 半导体
+    - 医药
+    - 军工
+    - 新能源
+    - 芯片
+    - 人工智能
+    - AI
+  broad_index:
+    - 沪深300
+    - 中证500
+    - 中证800
+    - 上证50
+    - 创业板
+    - MSCI
+    - 全指
+    - 标普
+
+allocation_bands:
+  tolerance: 0.05          # 大类配置偏离容忍带（阶段 2 仓位诊断使用）
+
+capital:
+  monthly_expense_default: 8000
+  emergency_min_months: 3
+  default_dca_months: 12
+  capital_under_utilization_threshold: 0.50
+
+# C 类份额赎回费阶梯（阶段 2 成本诊断使用；阶段 1 就在配置里写好避免后续迁移）
+redemption_fees:
+  default_c_class:
+    - min_days: 0
+      max_days: 6          # 持有 < 7 天
+      rate: 0.015
+    - min_days: 7
+      max_days: 29         # 7–30 天（含 30 天前一天）
+      rate: 0.005
+    - min_days: 30
+      max_days: null       # 满 30 天免赎回费
+      rate: 0.0
+  overrides: {}            # 按基金代码覆盖，例：{"017513": [...]}
+
+# 历史压力测试场景（阶段 3 使用）
+stress_scenarios:
+  - name: "2022 春季杀跌"
+    start: "2022-01-01"
+    end: "2022-04-30"
+  - name: "2024 年初雪球敲出"
+    start: "2024-01-01"
+    end: "2024-02-08"
+
+llm:
+  provider: deepseek       # deepseek / zhipu
+  mode: deep               # light (deepseek-chat) / deep (deepseek-reasoner)
+  monthly_budget_warn: 80
+  monthly_budget_block: 100
