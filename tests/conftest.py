@@ -31,6 +31,27 @@ def default_settings() -> Settings:
     )
 
 
+@pytest.fixture
+def default_settings_with_fees() -> Settings:
+    """附带 C 类赎回费阶梯（0-6:1.5%, 7-29:0.5%, 30+:0%）的 Settings。"""
+    return Settings.model_validate(
+        {
+            "concentration_keywords": {
+                "high_volatility": ["北证", "北交所", "科创", "行业", "主题"],
+                "broad_index": ["沪深300", "中证500", "创业板"],
+            },
+            "redemption_fees": {
+                "default_c_class": [
+                    {"min_days": 0, "max_days": 6, "rate": "0.015"},
+                    {"min_days": 7, "max_days": 29, "rate": "0.005"},
+                    {"min_days": 30, "max_days": None, "rate": "0.0"},
+                ],
+                "overrides": {},
+            },
+        }
+    )
+
+
 def make_holding(
     *,
     code: str = "000001",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date as _date
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -9,6 +10,16 @@ from fund_advisor.advisor import advisor as advisor_mod
 from fund_advisor.models import Action, FundType
 
 from ..conftest import make_holding, make_portfolio
+
+
+def _fake_index_valuation(symbol: str) -> dict:
+    return {
+        "symbol": symbol,
+        "as_of": _date(2026, 4, 20),
+        "pe": Decimal("12.0"),
+        "pb": Decimal("1.3"),
+        "pe_percentile": Decimal("0.50"),
+    }
 
 
 def _fake_enrich(holding, **kwargs):
@@ -31,6 +42,9 @@ def test_fallback_when_no_llm(default_settings):
     with patch(
         "fund_advisor.advisor.advisor.enrich_holding_inplace",
         side_effect=_fake_enrich,
+    ), patch(
+        "fund_advisor.diagnostics.valuation.get_index_valuation",
+        side_effect=_fake_index_valuation,
     ):
         report = advisor_mod.run_diagnosis(
             p, default_settings, llm_client=None, resolve=True
