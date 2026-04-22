@@ -80,6 +80,69 @@ def _signals_block(report: DiagnosisReport) -> str:
     )
 
 
+def _position_block(report: DiagnosisReport) -> str:
+    pos = report.position_diagnosis
+    if pos is None or not pos.buckets:
+        return "（无仓位数据）"
+    lines = []
+    for b in pos.buckets:
+        if b.category == "other" and b.actual_value <= 0:
+            continue
+        flag = ""
+        if b.deviation > pos.tolerance:
+            flag = " ❗超配"
+        elif b.deviation < -pos.tolerance:
+            flag = " ↘️ 欠配"
+        lines.append(
+            f"  - {b.category}: 实际 {float(b.actual_ratio) * 100:.2f}%, "
+            f"目标 {float(b.target_ratio) * 100:.2f}%"
+            f"（偏离 {float(b.deviation) * 100:+.2f}%）{flag}"
+        )
+    return "\n".join(lines)
+
+
+def _cost_block(report: DiagnosisReport) -> str:
+    cst = report.cost_diagnosis
+    if cst is None or not cst.items:
+        return "（无成本数据）"
+    lines = []
+    for it in cst.items:
+        ann = (
+            f"年化 {float(it.annualized_return) * 100:+.2f}%"
+            if it.annualized_return is not None
+            else "年化 n/a"
+        )
+        cclass = ""
+        if it.is_c_class:
+            cur = f"{float(it.current_redemption_fee_rate or 0) * 100:.2f}%"
+            if it.next_tier_days_away is not None:
+                cclass = f"，C 类当前赎回费 {cur}，再 {it.next_tier_days_away} 天降档"
+            else:
+                cclass = f"，C 类当前赎回费 {cur}（已最优）"
+        lines.append(
+            f"  - {it.fund_code} {it.fund_name}: 持 {it.held_days} 天, "
+            f"浮盈亏 ¥{it.pnl} ({float(it.pnl_pct) * 100:+.2f}%), {ann}{cclass}"
+        )
+    return "\n".join(lines)
+
+
+def _valuation_block(report: DiagnosisReport) -> str:
+    val = report.valuation_diagnosis
+    if val is None or not val.items:
+        return "（无估值数据）"
+    lines = []
+    for it in val.items:
+        if it.status.value == "unavailable":
+            lines.append(f"  - {it.fund_code} {it.fund_name}: 无估值数据 ({it.note})")
+            continue
+        pe_p = f"{float(it.pe_percentile or 0) * 100:.1f}%" if it.pe_percentile is not None else "—"
+        lines.append(
+            f"  - {it.fund_code} {it.fund_name} (对应 {it.index_symbol}): "
+            f"PE {it.pe}, 3年分位 {pe_p} → {it.status.value} (截至 {it.as_of})"
+        )
+    return "\n".join(lines)
+
+
 def _settlement_block(portfolio: Portfolio) -> str:
     lines = []
     for h in portfolio.holdings:
@@ -119,6 +182,9 @@ def synthesize_diagnosis(
         emergency_min="3",
         dca_budget=_fmt(cap.dca_budget_per_month),
         concentration_block=_concentration_block(report),
+        position_block=_position_block(report),
+        cost_block=_cost_block(report),
+        valuation_block=_valuation_block(report),
         signals_block=_signals_block(report),
         settlement_block=_settlement_block(portfolio),
     )

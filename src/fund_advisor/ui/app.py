@@ -24,7 +24,10 @@ from fund_advisor.data.akshare_client import (
     FundDataError,
     clear_cache,
     get_basic_info,
+    get_index_valuation,
     get_latest_nav,
+    get_nav_history,
+    match_index_symbol,
 )
 from fund_advisor.models import (
     Action,
@@ -132,8 +135,8 @@ def render_today(portfolio: Portfolio, settings: Settings) -> None:
             client = _get_llm_client() if use_llm else None
             if use_llm and client is None:
                 st.warning(
-                    "未检测到 `DEEPSEEK_API_KEY`，将降级为纯规则兜底输出。"
-                    "请在 `.env` 中配置后重试。"
+                    "未检测到 `DEEPSEEK_API_KEY` 或客户端初始化失败，"
+                    "将降级为纯规则兜底输出。请在 `.env` 中配置后重试。"
                 )
 
             with st.status("生成中…", expanded=True) as status:
@@ -246,6 +249,86 @@ def render_today(portfolio: Portfolio, settings: Settings) -> None:
             f"应急金 {float(c.emergency_adequacy_months):.2f} 月、"
             f"建议月度定投 ¥{float(c.dca_budget_per_month):,.2f}"
         )
+
+        if report.position_diagnosis:
+            st.markdown("**大类仓位 (target 已按 invested/total 等效缩放)**")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "类别": b.category,
+                            "目标": f"{float(b.target_ratio) * 100:.2f}%",
+                            "实际": f"{float(b.actual_ratio) * 100:.2f}%",
+                            "偏离": f"{float(b.deviation) * 100:+.2f}%",
+                            "金额": float(b.actual_value),
+                        }
+                        for b in report.position_diagnosis.buckets
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        if report.cost_diagnosis:
+            st.markdown("**成本 & 赎回费阶梯**")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "代码": it.fund_code,
+                            "名称": it.fund_name,
+                            "持有天数": it.held_days,
+                            "浮盈亏": float(it.pnl),
+                            "收益率": f"{float(it.pnl_pct) * 100:+.2f}%",
+                            "年化(近似)": (
+                                f"{float(it.annualized_return) * 100:+.2f}%"
+                                if it.annualized_return is not None
+                                else "—"
+                            ),
+                            "C 类": "✅" if it.is_c_class else "",
+                            "当前赎回费": (
+                                f"{float(it.current_redemption_fee_rate) * 100:.2f}%"
+                                if it.current_redemption_fee_rate is not None
+                                else "—"
+                            ),
+                            "距下一档": (
+                                f"{it.next_tier_days_away} 天"
+                                if it.next_tier_days_away is not None
+                                else "—"
+                            ),
+                        }
+                        for it in report.cost_diagnosis.items
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        if report.valuation_diagnosis:
+            st.markdown("**估值温度（近 3 年 PE 分位）**")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "代码": it.fund_code,
+                            "名称": it.fund_name,
+                            "对应指数": it.index_symbol or "—",
+                            "PE": float(it.pe) if it.pe is not None else None,
+                            "3 年分位": (
+                                f"{float(it.pe_percentile) * 100:.1f}%"
+                                if it.pe_percentile is not None
+                                else "—"
+                            ),
+                            "温度": it.status.value,
+                            "截至": it.as_of.isoformat() if it.as_of else "—",
+                            "备注": it.note,
+                        }
+                        for it in report.valuation_diagnosis.items
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     with st.expander("📄 完整诊断 JSON（调试用）"):
         st.code(report.model_dump_json(indent=2), language="json")
@@ -546,6 +629,115 @@ def render_candidate(portfolio: Portfolio, settings: Settings) -> None:
         pass
 
 
+# ------------------- Tab：基金明细（净值曲线 + 指数估值） -------------------
+@st.cache_data(show_spinner=False, ttl=3600)
+def _cached_nav_history(code: str, years: int) -> list[dict]:
+    rows = get_nav_history(code, years=years)
+    # Decimal 不能直接进 plotly，转 float
+    return [
+        {"date": r["date"], "nav": float(r["nav"]), "daily_change_pct": float(r["daily_change_pct"])}
+        for r in rows
+    ]
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _cached_index_valuation(symbol: str) -> dict:
+    v = get_index_valuation(symbol)
+    return {
+        "symbol": v["symbol"],
+        "as_of": v["as_of"].isoformat() if v.get("as_of") else None,
+        "pe": float(v["pe"]) if v.get("pe") is not None else None,
+        "pb": float(v["pb"]) if v.get("pb") is not None else None,
+        "pe_percentile": float(v["pe_percentile"]) if v.get("pe_percentile") is not None else None,
+    }
+
+
+def render_fund_detail(portfolio: Portfolio) -> None:
+    st.subheader("基金明细")
+    st.caption("选择一只持仓，查看近 3 年净值曲线与对应指数估值分位（若能匹配）。")
+
+    if not portfolio.holdings:
+        st.info("当前没有持仓。")
+        return
+
+    code_options = [f"{h.code} · {h.name or '(待补全)'}" for h in portfolio.holdings]
+    selected_label = st.selectbox("选择基金", code_options)
+    selected_code = selected_label.split(" · ")[0]
+    selected = next((h for h in portfolio.holdings if h.code == selected_code), None)
+    if selected is None:
+        return
+
+    years = st.slider("净值曲线年限", 1, 5, 3)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric(
+        "最新净值",
+        f"{selected.latest_nav}" if selected.latest_nav else "—",
+        f"截至 {selected.latest_nav_date}" if selected.latest_nav_date else None,
+    )
+    c2.metric("成本价", f"{selected.cost_price}")
+    c3.metric("持有天数", f"{(pd.Timestamp.today().date() - selected.purchase_date).days}")
+
+    # ---- 净值曲线 ----
+    try:
+        with st.spinner(f"加载 {selected_code} 近 {years} 年净值…"):
+            rows = _cached_nav_history(selected_code, years)
+    except FundDataError as e:
+        st.warning(f"净值曲线不可用：{e}")
+        rows = []
+
+    if rows:
+        df_nav = pd.DataFrame(rows)
+        fig = px.line(df_nav, x="date", y="nav", title=f"{selected_code} 近 {years} 年单位净值")
+        fig.add_hline(
+            y=float(selected.cost_price),
+            line_dash="dash",
+            annotation_text=f"成本价 {selected.cost_price}",
+            annotation_position="bottom right",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ---- 对应指数估值 ----
+    st.markdown("---")
+    st.markdown("### 对应指数估值（近 3 年 PE 分位）")
+    symbol = match_index_symbol(selected.name or "")
+    if symbol is None:
+        st.info("该基金名称未匹配到宽基指数，暂不展示估值分位。")
+        return
+
+    try:
+        with st.spinner(f"加载指数 {symbol} 估值…"):
+            val = _cached_index_valuation(symbol)
+    except FundDataError as e:
+        st.warning(f"指数估值不可用：{e}")
+        return
+
+    pe_pct = val.get("pe_percentile")
+    cc1, cc2, cc3, cc4 = st.columns(4)
+    cc1.metric("对应指数", symbol)
+    cc2.metric("PE", f"{val['pe']}" if val.get("pe") is not None else "—")
+    cc3.metric("PB", f"{val['pb']}" if val.get("pb") is not None else "—")
+    cc4.metric(
+        "3 年分位",
+        f"{pe_pct * 100:.1f}%" if pe_pct is not None else "—",
+        _temperature_label(pe_pct),
+    )
+    if val.get("as_of"):
+        st.caption(f"数据截至 {val['as_of']}")
+
+
+def _temperature_label(pe_pct: float | None) -> str | None:
+    if pe_pct is None:
+        return None
+    if pe_pct <= 0.30:
+        return "🟢 低估区间"
+    if pe_pct < 0.70:
+        return "⚪ 正常区间"
+    if pe_pct < 0.80:
+        return "🟡 偏高"
+    return "🔴 过热"
+
+
 # ------------------- Tab 5：用量与成本 -------------------
 def render_usage() -> None:
     st.subheader("用量与成本（本次会话）")
@@ -603,7 +795,7 @@ def main() -> None:
             st.success(f"已清理 {n} 个缓存文件。")
 
     tabs = st.tabs(
-        ["📣 今日建议", "组合总览", "持仓管理", "候选基金分析", "用量与成本"]
+        ["📣 今日建议", "组合总览", "基金明细", "持仓管理", "候选基金分析", "用量与成本"]
     )
     with tabs[0]:
         if portfolio:
@@ -613,11 +805,14 @@ def main() -> None:
             render_overview(portfolio)
     with tabs[2]:
         if portfolio:
-            render_manage(portfolio)
+            render_fund_detail(portfolio)
     with tabs[3]:
         if portfolio:
-            render_candidate(portfolio, settings)
+            render_manage(portfolio)
     with tabs[4]:
+        if portfolio:
+            render_candidate(portfolio, settings)
+    with tabs[5]:
         render_usage()
 
 

@@ -124,6 +124,90 @@ class CapitalDiagnosis(BaseModel):
     signals: list[Signal] = Field(default_factory=list)
 
 
+# ---- 仓位（大类配置）诊断 ----
+class AllocationBucket(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    category: str = Field(description="equity_fund / bond_fund / money_fund / cash / other")
+    target_ratio: Decimal
+    actual_ratio: Decimal
+    deviation: Decimal = Field(description="actual - target（正=超配，负=欠配）")
+    actual_value: Decimal
+
+
+class PositionDiagnosis(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    total_assets: Decimal
+    tolerance: Decimal = Field(description="偏离容忍带（±）")
+    buckets: list[AllocationBucket] = Field(default_factory=list)
+    signals: list[Signal] = Field(default_factory=list)
+
+
+# ---- 成本诊断 ----
+class CostItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fund_code: str
+    fund_name: str
+    fund_type: str
+    shares: Decimal
+    cost_price: Decimal
+    latest_nav: Decimal | None = None
+    market_value: Decimal
+    cost_value: Decimal
+    pnl: Decimal
+    pnl_pct: Decimal
+    held_days: int
+    annualized_return: Decimal | None = Field(
+        default=None, description="简单年化收益率（近似 IRR）"
+    )
+    is_c_class: bool = Field(description="是否 C 类份额（名称末尾含 'C'）")
+    current_redemption_fee_rate: Decimal | None = Field(
+        default=None, description="当前赎回费率（按持有天数落在哪个阶梯）"
+    )
+    next_tier_days_away: int | None = Field(
+        default=None, description="距离下一个更优赎回费阶梯还需持有的天数（None 表示已最优）"
+    )
+
+
+class CostDiagnosis(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[CostItem] = Field(default_factory=list)
+    signals: list[Signal] = Field(default_factory=list)
+
+
+# ---- 估值诊断 ----
+class ValuationStatus(StrEnum):
+    LOW = "low"              # ≤30 分位
+    NORMAL = "normal"        # 30-70
+    HIGH = "high"            # 70-80
+    OVERHEATED = "overheated"  # ≥80
+    UNAVAILABLE = "unavailable"  # 没有可用数据
+
+
+class ValuationItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fund_code: str
+    fund_name: str
+    index_symbol: str | None = Field(default=None, description="映射到的指数名（如 '沪深300'）")
+    pe: Decimal | None = None
+    pb: Decimal | None = None
+    pe_percentile: Decimal | None = Field(default=None, description="0-1 之间，近 3 年分位")
+    status: ValuationStatus = ValuationStatus.UNAVAILABLE
+    as_of: date | None = None
+    note: str = ""
+
+
+class ValuationDiagnosis(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ValuationItem] = Field(default_factory=list)
+    signals: list[Signal] = Field(default_factory=list)
+
+
 class HoldingSnapshot(BaseModel):
     """给 UI/LLM 展示用的单只基金快照。"""
 
@@ -180,6 +264,9 @@ class DiagnosisReport(BaseModel):
     portfolio_summary: PortfolioSummary
     concentration_diagnosis: ConcentrationDiagnosis
     capital_diagnosis: CapitalDiagnosis
+    position_diagnosis: PositionDiagnosis | None = None
+    cost_diagnosis: CostDiagnosis | None = None
+    valuation_diagnosis: ValuationDiagnosis | None = None
     signals: list[Signal] = Field(default_factory=list)
     llm_synthesis: LLMSynthesis | None = None
     action_items: list[ActionItem] = Field(default_factory=list)

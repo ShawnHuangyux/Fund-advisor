@@ -16,7 +16,7 @@ from typing import Callable
 from loguru import logger
 
 from ..data.akshare_client import enrich_holding_inplace
-from ..diagnostics import capital, concentration
+from ..diagnostics import capital, concentration, cost, position, valuation
 from ..models import (
     Action,
     ActionItem,
@@ -114,13 +114,35 @@ def _fallback_synthesis(report: DiagnosisReport) -> tuple[LLMSynthesis, list[Act
                 ActionItem(
                     fund_code=it.fund_code,
                     fund_name=it.fund_name,
-                    action=Action.PAUSE_DCA if not has_emergency else Action.PAUSE_DCA,
+                    action=Action.PAUSE_DCA,
                     amount_rmb=None,
                     priority="medium",
                     rationale=f"集中度超标：{float(it.actual_ratio)*100:.2f}% > {float(it.cap_ratio)*100:.0f}%",
                     alternative_view="如果你是长期看好该品种，也可维持定投但严控金额。",
                 )
             )
+    # 阶段 2：赎回费阶梯即将降档时强制提醒
+    if report.cost_diagnosis:
+        for ci in report.cost_diagnosis.items:
+            if (
+                ci.is_c_class
+                and ci.next_tier_days_away is not None
+                and ci.next_tier_days_away <= 3
+            ):
+                items.append(
+                    ActionItem(
+                        fund_code=ci.fund_code,
+                        fund_name=ci.fund_name,
+                        action=Action.HOLD_OBSERVE,
+                        amount_rmb=None,
+                        priority="high",
+                        rationale=(
+                            f"C 类赎回费阶梯：再等 {ci.next_tier_days_away} 天即可降档"
+                            f"（当前费率 {float(ci.current_redemption_fee_rate or 0) * 100:.2f}%）。"
+                        ),
+                        alternative_view="若急需资金，赎回费仍可承担。",
+                    )
+                )
     return synth, items
 
 
@@ -147,13 +169,28 @@ def run_diagnosis(
         progress("跑规则引擎…")
     conc = concentration.diagnose(portfolio, settings)
     cap = capital.diagnose(portfolio, settings)
-    all_signals: list[Signal] = [*conc.signals, *cap.signals]
+    pos = position.diagnose(portfolio, settings)
+    cst = cost.diagnose(portfolio, settings)
+    if progress:
+        progress("拉取指数估值…")
+    val = valuation.diagnose(portfolio, settings)
+
+    all_signals: list[Signal] = [
+        *conc.signals,
+        *cap.signals,
+        *pos.signals,
+        *cst.signals,
+        *val.signals,
+    ]
 
     report = DiagnosisReport(
         generated_at=datetime.now(),
         portfolio_summary=build_summary(portfolio),
         concentration_diagnosis=conc,
         capital_diagnosis=cap,
+        position_diagnosis=pos,
+        cost_diagnosis=cst,
+        valuation_diagnosis=val,
         signals=all_signals,
     )
 
