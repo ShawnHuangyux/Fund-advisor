@@ -28,3 +28,4 @@ htmlcov/
 # IDE
 .idea/
 .vscode/
+.claude/worktrees/
