@@ -21,7 +21,24 @@
 - 仓位诊断、成本诊断（含 C 类赎回费阶梯提醒）、估值诊断（阶段 2）
 - 风险诊断与 2022/2024 历史压力测试（阶段 3）
 - DeepSeek / 智谱 LLM 综合意见 + action_items 生成（阶段 4）
-- APScheduler 每日 16:30 定时任务（阶段 5）
+
+### 阶段 5：每日定时诊断（已接入）
+
+```bash
+# 常驻进程：每个交易日 16:30 (Asia/Shanghai) 自动跑一次，落盘到 reports/YYYY-MM-DD.json
+uv run fund-advisor-scheduler
+
+# 启动时立刻跑一次再进调度（用于开发调试）
+uv run fund-advisor-scheduler --run-now
+
+# 只跑一次就退出（用于 launchd / 系统 cron）
+uv run fund-advisor-scheduler --run-once
+```
+
+- 调度参数在 `config/settings.yaml` 的 `scheduler` 小节可调（hour / minute / timezone / reports_dir）。
+- 日志写入 `logs/scheduler.log`（每日轮转、保留 14 天）。
+- Streamlit UI 侧边栏的"历史报告"下拉可回看最近 30 份落盘诊断。
+- 任务默认走 `llm.mode`（通常 deep）+ 阶段 4 的月度预算门槛——超 ¥100 自动降级为规则兜底。
 
 ---
 

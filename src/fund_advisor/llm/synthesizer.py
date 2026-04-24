@@ -126,6 +126,44 @@ def _cost_block(report: DiagnosisReport) -> str:
     return "\n".join(lines)
 
 
+def _risk_block(report: DiagnosisReport) -> str:
+    rd = report.risk_diagnosis
+    if rd is None:
+        return "  （本次未计算风险指标）"
+    lines: list[str] = []
+    wmdd = rd.weighted_max_drawdown_1y
+    wvol = rd.weighted_annualized_volatility
+    lines.append(
+        f"  - 加权最大回撤 (1Y): {float(wmdd) * 100:.2f}%"
+        if wmdd is not None else "  - 加权最大回撤 (1Y): —"
+    )
+    lines.append(
+        f"  - 加权年化波动率: {float(wvol) * 100:.2f}%"
+        if wvol is not None else "  - 加权年化波动率: —"
+    )
+    for m in rd.fund_metrics:
+        mdd_s = (
+            f"{float(m.max_drawdown_1y) * 100:.2f}%"
+            if m.max_drawdown_1y is not None else "—"
+        )
+        vol_s = (
+            f"{float(m.annualized_volatility) * 100:.2f}%"
+            if m.annualized_volatility is not None else "—"
+        )
+        caveat = f" (⚠️ {m.data_caveat})" if m.data_caveat else ""
+        lines.append(
+            f"  - {m.fund_code} {m.fund_name}: 回撤 {mdd_s}, 波动 {vol_s}{caveat}"
+        )
+    for t in rd.stress_tests:
+        flag = "❗超阈" if t.breach_tolerance else "ok"
+        miss = f"（缺失 {', '.join(t.missing_funds)}）" if t.missing_funds else ""
+        lines.append(
+            f"  - 场景「{t.scenario_name}」 {t.start}→{t.end}: "
+            f"组合假设损失 {float(t.portfolio_loss) * 100:.2f}% [{flag}]{miss}"
+        )
+    return "\n".join(lines)
+
+
 def _valuation_block(report: DiagnosisReport) -> str:
     val = report.valuation_diagnosis
     if val is None or not val.items:
@@ -185,12 +223,13 @@ def synthesize_diagnosis(
         position_block=_position_block(report),
         cost_block=_cost_block(report),
         valuation_block=_valuation_block(report),
+        risk_block=_risk_block(report),
         signals_block=_signals_block(report),
         settlement_block=_settlement_block(portfolio),
     )
 
     parsed, record = client.chat_json(
-        system=SYSTEM_DIAGNOSIS, user=user_msg, mode=mode
+        system=SYSTEM_DIAGNOSIS, user=user_msg, mode=mode, kind="diagnosis"
     )
 
     synth = LLMSynthesis(
@@ -291,7 +330,7 @@ def analyze_candidate(
     )
 
     parsed, record = client.chat_json(
-        system=SYSTEM_CANDIDATE, user=user_msg, mode=mode
+        system=SYSTEM_CANDIDATE, user=user_msg, mode=mode, kind="candidate"
     )
 
     try:

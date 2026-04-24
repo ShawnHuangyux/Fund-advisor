@@ -15,8 +15,10 @@ from typing import Callable
 
 from loguru import logger
 
-from ..data.akshare_client import enrich_holding_inplace
-from ..diagnostics import capital, concentration, cost, position, valuation
+import pandas as pd
+
+from ..data.akshare_client import FundDataError, enrich_holding_inplace, get_nav_history
+from ..diagnostics import capital, concentration, cost, position, risk, valuation
 from ..models import (
     Action,
     ActionItem,
@@ -28,6 +30,7 @@ from ..models import (
     Portfolio,
     PortfolioSummary,
     Settings,
+    Severity,
     Signal,
 )
 
@@ -36,6 +39,12 @@ try:
 except Exception:  # pragma: no cover - openai 未装时兜底
     DeepSeekClient = None  # type: ignore
     synthesize_diagnosis = None  # type: ignore
+
+try:
+    from ..data.usage_db import budget_state, current_month_cost
+except Exception:  # pragma: no cover - sqlite 理论上一定存在
+    budget_state = None  # type: ignore
+    current_month_cost = None  # type: ignore
 
 
 def resolve_portfolio(portfolio: Portfolio, *, progress: Callable[[str], None] | None = None) -> list[dict]:
@@ -175,12 +184,37 @@ def run_diagnosis(
         progress("拉取指数估值…")
     val = valuation.diagnose(portfolio, settings)
 
+    if progress:
+        progress("拉取历史净值（用于风险/压力测试）…")
+    nav_histories: dict[str, pd.DataFrame] = {}
+    for h in portfolio.holdings:
+        if h.fund_type == FundType.MONEY:
+            nav_histories[h.code] = pd.DataFrame()
+            continue
+        try:
+            rows = get_nav_history(h.code, years=3)
+            nav_histories[h.code] = pd.DataFrame(
+                [
+                    {
+                        "净值日期": r["date"],
+                        "单位净值": r["nav"],
+                        "日增长率": r["daily_change_pct"],
+                    }
+                    for r in rows
+                ]
+            )
+        except FundDataError as e:
+            logger.warning("get_nav_history({}) 失败：{}", h.code, e)
+            nav_histories[h.code] = pd.DataFrame()
+    rsk = risk.diagnose(portfolio, settings, nav_histories=nav_histories)
+
     all_signals: list[Signal] = [
         *conc.signals,
         *cap.signals,
         *pos.signals,
         *cst.signals,
         *val.signals,
+        *rsk.signals,
     ]
 
     report = DiagnosisReport(
@@ -191,8 +225,41 @@ def run_diagnosis(
         position_diagnosis=pos,
         cost_diagnosis=cst,
         valuation_diagnosis=val,
+        risk_diagnosis=rsk,
         signals=all_signals,
     )
+
+    # Phase 4：月度预算门槛。block 时 deep 模式强制降级为规则兜底。
+    if (
+        llm_client is not None
+        and budget_state is not None
+        and current_month_cost is not None
+    ):
+        try:
+            state = budget_state(settings.llm)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("读取 LLM 账单失败：{}", e)
+            state = "ok"
+        if state == "block" and llm_mode == "deep":
+            cost_now = current_month_cost()
+            logger.warning(
+                "本月 LLM 成本 ¥{:.2f} 已达阻断线，深度模式禁用，降级为规则兜底",
+                float(cost_now),
+            )
+            report.signals.append(
+                Signal(
+                    code="LLM_BUDGET_BLOCKED",
+                    severity=Severity.WARN,
+                    message=(
+                        f"本月 LLM 成本 ¥{float(cost_now):.2f} ≥ "
+                        f"阻断阈值 ¥{float(settings.llm.monthly_budget_block):.0f}；"
+                        "深度模式已禁用，本次走纯规则兜底。"
+                    ),
+                )
+            )
+            llm_client = None
+        elif state == "warn":
+            logger.warning("本月 LLM 成本已过警告线（仅提示，不阻断）")
 
     if llm_client is not None and synthesize_diagnosis is not None:
         try:

@@ -208,6 +208,39 @@ class ValuationDiagnosis(BaseModel):
     signals: list[Signal] = Field(default_factory=list)
 
 
+# ---- 风险诊断（阶段 3） ----
+class FundRiskMetric(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fund_code: str
+    fund_name: str
+    max_drawdown_1y: Decimal | None = None
+    annualized_volatility: Decimal | None = None
+    data_caveat: str | None = None
+
+
+class StressTestResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scenario_name: str
+    start: date
+    end: date
+    portfolio_loss: Decimal = Field(description="正值表示跌幅，0.22 = 22%")
+    breach_tolerance: bool
+    fund_losses: dict[str, Decimal | None] = Field(default_factory=dict)
+    missing_funds: list[str] = Field(default_factory=list)
+
+
+class RiskDiagnosis(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fund_metrics: list[FundRiskMetric] = Field(default_factory=list)
+    weighted_max_drawdown_1y: Decimal | None = None
+    weighted_annualized_volatility: Decimal | None = None
+    stress_tests: list[StressTestResult] = Field(default_factory=list)
+    signals: list[Signal] = Field(default_factory=list)
+
+
 class HoldingSnapshot(BaseModel):
     """给 UI/LLM 展示用的单只基金快照。"""
 
@@ -267,6 +300,7 @@ class DiagnosisReport(BaseModel):
     position_diagnosis: PositionDiagnosis | None = None
     cost_diagnosis: CostDiagnosis | None = None
     valuation_diagnosis: ValuationDiagnosis | None = None
+    risk_diagnosis: RiskDiagnosis | None = None
     signals: list[Signal] = Field(default_factory=list)
     llm_synthesis: LLMSynthesis | None = None
     action_items: list[ActionItem] = Field(default_factory=list)

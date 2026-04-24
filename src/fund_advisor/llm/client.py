@@ -31,6 +31,7 @@ class UsageRecord:
     prompt_tokens: int
     completion_tokens: int
     reasoning_tokens: int = 0
+    provider: str = "deepseek"
 
 
 @dataclass
@@ -65,10 +66,12 @@ class DeepSeekClient:
         mode: str = "deep",
         max_tokens: int | None = 2048,
         temperature: float = 0.4,
+        kind: str = "diagnosis",
     ) -> tuple[dict[str, Any], UsageRecord]:
         """调用 DeepSeek 并强制 JSON 输出。
 
         mode="deep" 用 reasoner（规格里要求的默认），"light" 用 chat。
+        kind: "diagnosis" 组合诊断 / "candidate" 候选分析，用于账单分类。
         """
         model = MODEL_DEEP if mode == "deep" else MODEL_LIGHT
         logger.info("DeepSeek chat_json model={} temp={}", model, temperature)
@@ -111,6 +114,14 @@ class DeepSeekClient:
             "DeepSeek 返回：input={} output={} reasoning={}",
             record.prompt_tokens, record.completion_tokens, record.reasoning_tokens,
         )
+        # 写入 SQLite 账单；失败只记日志不影响主流程
+        try:
+            from ..data.usage_db import record_usage
+
+            cost = record_usage(record, kind=kind, provider="deepseek")
+            logger.info("本次成本 ¥{:.4f}（kind={}）", float(cost), kind)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("写入 LLM 账单失败：{}", e)
         return parsed, record
 
 

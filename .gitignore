@@ -8,6 +8,10 @@ data/cache/
 config/*.backup-*
 config/*.bak
 
+# 阶段 5：定时任务产物（含持仓金额，不入库）
+reports/*.json
+logs/
+
 # python
 __pycache__/
 *.py[cod]

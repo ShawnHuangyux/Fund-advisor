@@ -86,6 +86,21 @@ class LLMSettings(BaseModel):
     monthly_budget_block: Decimal = Field(default=Decimal("100"))
 
 
+class SchedulerSettings(BaseModel):
+    """阶段 5：APScheduler 每日定时任务配置。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    timezone: str = Field(default="Asia/Shanghai")
+    cron_hour: int = Field(default=16, ge=0, le=23)
+    cron_minute: int = Field(default=30, ge=0, le=59)
+    day_of_week: str = Field(
+        default="mon-fri", description="APScheduler cron day_of_week 表达式"
+    )
+    reports_dir: str = Field(default="reports", description="相对项目根目录")
+
+
 class Settings(BaseModel):
     """全局策略参数根对象。"""
 
@@ -100,3 +115,4 @@ class Settings(BaseModel):
     redemption_fees: RedemptionFees = Field(default_factory=RedemptionFees)
     stress_scenarios: list[StressScenario] = Field(default_factory=list)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    scheduler: SchedulerSettings = Field(default_factory=SchedulerSettings)
