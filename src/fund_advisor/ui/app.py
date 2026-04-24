@@ -32,6 +32,7 @@ from fund_advisor.data.akshare_client import (
 from fund_advisor.models import (
     Action,
     CandidateRequest,
+    DiagnosisReport,
     FundType,
     Holding,
     Portfolio,
@@ -43,10 +44,11 @@ from fund_advisor.models import (
 )
 
 try:
-    from fund_advisor.llm import DeepSeekClient, analyze_candidate
+    from fund_advisor.llm import DeepSeekClient, analyze_candidate, build_deepseek_client
 except Exception:  # noqa: BLE001
     DeepSeekClient = None  # type: ignore
     analyze_candidate = None  # type: ignore
+    build_deepseek_client = None  # type: ignore
 
 load_dotenv()
 
@@ -58,6 +60,7 @@ DISCLAIMER = (
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PORTFOLIO_PATH = PROJECT_ROOT / "config" / "portfolio.yaml"
 SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.yaml"
+REPORTS_DIR = PROJECT_ROOT / "reports"
 
 ACTION_LABEL = {
     Action.START_DCA: "🟢 启动定投",
@@ -100,17 +103,66 @@ def _get_portfolio() -> Portfolio | None:
 
 
 def _get_llm_client() -> "DeepSeekClient | None":
-    if DeepSeekClient is None:
+    if build_deepseek_client is None:
         return None
-    key = os.getenv("DEEPSEEK_API_KEY")
-    if not key:
-        return None
-    try:
-        client = DeepSeekClient(api_key=key)
-    except Exception as e:  # noqa: BLE001
-        st.warning(f"DeepSeek 客户端初始化失败：{e}")
-        return None
-    return client
+    return build_deepseek_client()
+
+
+def _render_risk_section(rd) -> None:
+    """风险 & 压力测试展示（嵌在今日建议的规则原始信号 expander 内）。"""
+    st.markdown("**风险 & 压力测试**")
+    c1, c2 = st.columns(2)
+    c1.metric(
+        "加权最大回撤 (1Y)",
+        f"{float(rd.weighted_max_drawdown_1y or 0) * 100:.2f}%",
+    )
+    c2.metric(
+        "加权年化波动率",
+        f"{float(rd.weighted_annualized_volatility or 0) * 100:.2f}%",
+    )
+    if rd.fund_metrics:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "代码": m.fund_code,
+                        "名称": m.fund_name,
+                        "最大回撤(1Y)": (
+                            f"{float(m.max_drawdown_1y) * 100:.2f}%"
+                            if m.max_drawdown_1y is not None
+                            else "—"
+                        ),
+                        "年化波动率": (
+                            f"{float(m.annualized_volatility) * 100:.2f}%"
+                            if m.annualized_volatility is not None
+                            else "—"
+                        ),
+                        "说明": m.data_caveat or "",
+                    }
+                    for m in rd.fund_metrics
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    if rd.stress_tests:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "场景": t.scenario_name,
+                        "起": t.start.isoformat(),
+                        "止": t.end.isoformat(),
+                        "组合假设损失": f"{float(t.portfolio_loss) * 100:.2f}%",
+                        "超阈": "❗" if t.breach_tolerance else "",
+                        "缺失基金": ", ".join(t.missing_funds) or "—",
+                    }
+                    for t in rd.stress_tests
+                ]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 
 # ------------------- Tab 1：今日建议 -------------------
@@ -121,13 +173,22 @@ def render_today(portfolio: Portfolio, settings: Settings) -> None:
         "结合你的现金/应急金/持仓集中度，调用 DeepSeek 给出一段可执行建议。"
     )
 
+    # 月度预算门槛：block 时强制不让选 deep
+    try:
+        from fund_advisor.data.usage_db import budget_state as _bs
+        _budget = _bs(settings.llm)
+    except Exception:  # noqa: BLE001
+        _budget = "ok"
+
     col_a, col_b, col_c = st.columns([1, 1, 2])
     use_llm = col_a.checkbox("使用 LLM 综合", value=True)
-    mode = col_b.selectbox(
-        "模式",
-        ["deep (reasoner)", "light (chat)"],
-        index=0,
-    )
+    mode_options = ["deep (reasoner)", "light (chat)"]
+    mode_index = 0
+    if _budget == "block":
+        mode_options = ["light (chat)"]
+        mode_index = 0
+        col_b.caption("⛔ 深度模式因本月预算阻断已禁用")
+    mode = col_b.selectbox("模式", mode_options, index=mode_index)
     mode_key = "deep" if mode.startswith("deep") else "light"
 
     with col_c:
@@ -154,6 +215,7 @@ def render_today(portfolio: Portfolio, settings: Settings) -> None:
                 status.update(label="完成 ✅", state="complete")
 
             st.session_state["report"] = report
+            st.session_state.pop("report_source", None)
             # 写回 YAML（把 akshare 补齐的 name/fund_type 落盘）
             try:
                 save_portfolio(portfolio, PORTFOLIO_PATH)
@@ -164,6 +226,10 @@ def render_today(portfolio: Portfolio, settings: Settings) -> None:
     if report is None:
         st.info("点击上方按钮开始。")
         return
+
+    source = st.session_state.get("report_source")
+    if source:
+        st.caption(f"📁 {source}（来自侧边栏加载）")
 
     # ---- 今日结论卡片 ----
     synth = report.llm_synthesis
@@ -329,6 +395,9 @@ def render_today(portfolio: Portfolio, settings: Settings) -> None:
                 use_container_width=True,
                 hide_index=True,
             )
+
+        if report.risk_diagnosis:
+            _render_risk_section(report.risk_diagnosis)
 
     with st.expander("📄 完整诊断 JSON（调试用）"):
         st.code(report.model_dump_json(indent=2), language="json")
@@ -547,6 +616,18 @@ def render_candidate(portfolio: Portfolio, settings: Settings) -> None:
             st.error("需要配置 DEEPSEEK_API_KEY 才能使用本功能。")
             return
 
+        # 月度预算阻断
+        try:
+            from fund_advisor.data.usage_db import budget_state as _bs
+            if _bs(settings.llm) == "block":
+                st.error(
+                    f"本月 LLM 成本已达阻断阈值 "
+                    f"¥{float(settings.llm.monthly_budget_block):.0f}，候选分析已禁用。"
+                )
+                return
+        except Exception:  # noqa: BLE001
+            pass
+
         code = code_input.strip().zfill(6)
         try:
             with st.spinner(f"查询 {code} 基本信息…"):
@@ -581,7 +662,7 @@ def render_candidate(portfolio: Portfolio, settings: Settings) -> None:
             result = analyze_candidate(
                 portfolio, req, basic, nav, client,
                 emergency_months=emergency_months,
-                mode="deep",
+                mode="light",
             )
         st.session_state["candidate_result"] = result
 
@@ -739,35 +820,55 @@ def _temperature_label(pe_pct: float | None) -> str | None:
 
 
 # ------------------- Tab 5：用量与成本 -------------------
-def render_usage() -> None:
-    st.subheader("用量与成本（本次会话）")
-    st.caption(
-        "持久化到 SQLite 的计费表将在后续阶段实现；这里只展示**当前 Streamlit 会话内**的累计。"
+def render_usage(settings: Settings) -> None:
+    from fund_advisor.data.usage_db import (
+        budget_state,
+        current_month_cost,
+        recent_usage,
     )
 
-    client = _get_llm_client()
-    if client is None or not client.usage_log:
-        st.info("本会话尚未发生 LLM 调用。")
+    st.subheader("用量与成本")
+
+    cost = current_month_cost()
+    state = budget_state(settings.llm)
+    warn_rmb = float(settings.llm.monthly_budget_warn)
+    block_rmb = float(settings.llm.monthly_budget_block)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("本月累计成本", f"¥{float(cost):.2f}")
+    c2.metric("警告阈值", f"¥{warn_rmb:.0f}")
+    c3.metric("阻断阈值", f"¥{block_rmb:.0f}")
+    if state == "warn":
+        st.warning(
+            f"本月 LLM 成本已超警告阈值 ¥{warn_rmb:.0f}，"
+            "继续使用深度推理请关注花费。"
+        )
+    elif state == "block":
+        st.error(
+            f"本月 LLM 成本已达阻断阈值 ¥{block_rmb:.0f}，"
+            "深度模式（deepseek-reasoner）已禁用；仍可使用 light 或纯规则兜底。"
+        )
+
+    rows = recent_usage(limit=50)
+    if not rows:
+        st.info("数据库中还没有 LLM 调用记录。")
         return
 
-    rows = [
-        {
-            "#": i + 1,
-            "模型": r.model,
-            "输入 tokens": r.prompt_tokens,
-            "输出 tokens": r.completion_tokens,
-            "reasoning tokens": r.reasoning_tokens,
-        }
-        for i, r in enumerate(client.usage_log)
-    ]
     df = pd.DataFrame(rows)
+    df["cost_rmb"] = df["cost_rmb"].map(lambda v: f"¥{float(v):.4f}")
+    df = df.rename(
+        columns={
+            "ts": "时间",
+            "provider": "提供商",
+            "model": "模型",
+            "kind": "用途",
+            "input_tokens": "输入 tokens",
+            "output_tokens": "输出 tokens",
+            "reasoning_tokens": "reasoning",
+            "cost_rmb": "成本",
+        }
+    )
     st.dataframe(df, use_container_width=True, hide_index=True)
-
-    total_in = sum(r.prompt_tokens for r in client.usage_log)
-    total_out = sum(r.completion_tokens for r in client.usage_log)
-    c1, c2 = st.columns(2)
-    c1.metric("累计输入 tokens", f"{total_in:,}")
-    c2.metric("累计输出 tokens", f"{total_out:,}")
 
 
 # ------------------- 主入口 -------------------
@@ -790,9 +891,52 @@ def main() -> None:
         key_ok = bool(os.getenv("DEEPSEEK_API_KEY"))
         st.markdown(f"DeepSeek Key：{'✅ 已配置' if key_ok else '❌ 未配置'}")
 
+        # 月度 LLM 预算指示
+        try:
+            from fund_advisor.data.usage_db import (
+                budget_state as _bs,
+                current_month_cost as _cmc,
+            )
+
+            _cost = _cmc()
+            _state = _bs(settings.llm)
+            st.metric(
+                "本月 LLM 成本",
+                f"¥{float(_cost):.2f}",
+                f"预算 ¥{float(settings.llm.monthly_budget_block):.0f}",
+            )
+            if _state == "warn":
+                st.warning("已超 ¥80 警告线")
+            elif _state == "block":
+                st.error("已达 ¥100 阻断线，deep 模式禁用")
+        except Exception:  # noqa: BLE001
+            pass
+
         if st.button("🗑️ 清空 akshare 缓存"):
             n = clear_cache()
             st.success(f"已清理 {n} 个缓存文件。")
+
+        # ---- 历史报告（阶段 5 定时任务落盘） ----
+        st.markdown("---")
+        st.markdown("**📁 历史报告**")
+        report_files = (
+            sorted(REPORTS_DIR.glob("*.json"), reverse=True)[:30]
+            if REPORTS_DIR.exists()
+            else []
+        )
+        if not report_files:
+            st.caption("暂无历史报告。启动 `fund-advisor-scheduler` 后每日 16:30 自动生成。")
+        else:
+            options = ["— 选择日期 —"] + [f.stem for f in report_files]
+            picked = st.selectbox("读取某日诊断", options, index=0, key="history_pick")
+            if picked != "— 选择日期 —":
+                try:
+                    text = (REPORTS_DIR / f"{picked}.json").read_text(encoding="utf-8")
+                    st.session_state["report"] = DiagnosisReport.model_validate_json(text)
+                    st.session_state["report_source"] = f"历史：{picked}"
+                    st.success(f"已加载 {picked} 的报告")
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"加载失败：{e}")
 
     tabs = st.tabs(
         ["📣 今日建议", "组合总览", "基金明细", "持仓管理", "候选基金分析", "用量与成本"]
@@ -813,7 +957,7 @@ def main() -> None:
         if portfolio:
             render_candidate(portfolio, settings)
     with tabs[5]:
-        render_usage()
+        render_usage(settings)
 
 
 if __name__ == "__main__":

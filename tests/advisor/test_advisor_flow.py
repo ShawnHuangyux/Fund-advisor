@@ -45,10 +45,18 @@ def test_fallback_when_no_llm(default_settings):
     ), patch(
         "fund_advisor.diagnostics.valuation.get_index_valuation",
         side_effect=_fake_index_valuation,
+    ), patch(
+        "fund_advisor.advisor.advisor.get_nav_history",
+        return_value=[],
     ):
         report = advisor_mod.run_diagnosis(
             p, default_settings, llm_client=None, resolve=True
         )
+
+    # 阶段 3：风险诊断应被接入
+    assert report.risk_diagnosis is not None
+    # stress_scenarios 可能为空（default_settings 没加），允许 0
+    assert isinstance(report.risk_diagnosis.fund_metrics, list)
 
     assert report.llm_synthesis is not None
     assert report.llm_synthesis.today_headline  # 有一段话

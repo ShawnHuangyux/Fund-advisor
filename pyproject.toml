@@ -20,7 +20,11 @@ dependencies = [
     "openai>=2.32.0",
     "tenacity>=9.1.4",
     "python-dotenv>=1.2.2",
+    "apscheduler>=3.10",
 ]
+
+[project.scripts]
+fund-advisor-scheduler = "fund_advisor.scheduler.runner:main"
 
 [dependency-groups]
 dev = [
