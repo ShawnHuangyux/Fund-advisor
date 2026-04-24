@@ -288,6 +288,39 @@ class LLMSynthesis(BaseModel):
     tokens_output: int | None = None
 
 
+class DataQualityReport(BaseModel):
+    """诊断数据完整性元信息。
+
+    任一字段非空，都代表该诊断是基于不完整数据产出的；UI 与 LLM 均应显式
+    提醒用户"本次报告可能不准确"。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    missing_name: list[str] = Field(
+        default_factory=list, description="缺 name 的基金代码（akshare 基本信息拉取失败）"
+    )
+    missing_fund_type: list[str] = Field(
+        default_factory=list,
+        description="fund_type 缺失或为 UNKNOWN 的基金代码；这些基金在仓位诊断中会被保守归入 equity_fund 桶",
+    )
+    missing_latest_nav: list[str] = Field(
+        default_factory=list,
+        description="缺 latest_nav 的非货基代码（货基 nav 恒为 1.0，不算缺失）",
+    )
+    missing_nav_history: list[str] = Field(
+        default_factory=list,
+        description="压力测试时没有历史净值的基金代码（从 RiskDiagnosis.stress_tests.missing_funds 汇总去重）",
+    )
+    overall_complete: bool = Field(
+        default=True, description="以上四个列表是否全空"
+    )
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="人类可读的警告文案，逐条说明数据缺失对哪个诊断模块的影响",
+    )
+
+
 class DiagnosisReport(BaseModel):
     """完整诊断报告。"""
 
@@ -301,6 +334,7 @@ class DiagnosisReport(BaseModel):
     cost_diagnosis: CostDiagnosis | None = None
     valuation_diagnosis: ValuationDiagnosis | None = None
     risk_diagnosis: RiskDiagnosis | None = None
+    data_quality: DataQualityReport | None = None
     signals: list[Signal] = Field(default_factory=list)
     llm_synthesis: LLMSynthesis | None = None
     action_items: list[ActionItem] = Field(default_factory=list)

@@ -231,6 +231,15 @@ def render_today(portfolio: Portfolio, settings: Settings) -> None:
     if source:
         st.caption(f"📁 {source}（来自侧边栏加载）")
 
+    # 数据完整性横幅：如 resolve 过程中有基金缺字段，顶部红字警示
+    dq = getattr(report, "data_quality", None)
+    if dq is not None and not dq.overall_complete:
+        with st.container():
+            st.warning(
+                "⚠️ 本次报告基于**不完整数据**：\n\n"
+                + "\n\n".join(f"- {w}" for w in dq.warnings)
+            )
+
     # ---- 今日结论卡片 ----
     synth = report.llm_synthesis
     if synth:
@@ -323,7 +332,7 @@ def render_today(portfolio: Portfolio, settings: Settings) -> None:
                     [
                         {
                             "类别": b.category,
-                            "目标": f"{float(b.target_ratio) * 100:.2f}%",
+                            "等效目标占比（按当前投入缩放）": f"{float(b.target_ratio) * 100:.2f}%",
                             "实际": f"{float(b.actual_ratio) * 100:.2f}%",
                             "偏离": f"{float(b.deviation) * 100:+.2f}%",
                             "金额": float(b.actual_value),
@@ -333,6 +342,13 @@ def render_today(portfolio: Portfolio, settings: Settings) -> None:
                 ),
                 use_container_width=True,
                 hide_index=True,
+            )
+            ta = portfolio.target_allocation
+            st.caption(
+                f"原始目标：股基 {float(ta.equity_fund) * 100:.0f}% / "
+                f"债基 {float(ta.bond_fund) * 100:.0f}% / "
+                f"货基 {float(ta.money_fund) * 100:.0f}%（均指投资部分占比）。"
+                "上表的「等效目标」按当前 invested_value/total_assets 缩放。"
             )
 
         if report.cost_diagnosis:
@@ -479,8 +495,66 @@ def _holdings_entry_df(portfolio: Portfolio) -> pd.DataFrame:
     )
 
 
+def _render_resolve_feedback(feedback: object) -> None:
+    """展示上一次"保存并联网补全"的结果；feedback 来自 session_state。"""
+    if feedback == "saved_no_resolve":
+        st.success("已写回 config/portfolio.yaml（未联网）。")
+        return
+    if not isinstance(feedback, list):
+        return
+
+    basic_failed = [r["code"] for r in feedback if r.get("basic_error")]
+    nav_failed = [
+        r["code"]
+        for r in feedback
+        if r.get("nav_error") and not r.get("basic_error")
+    ]
+
+    if basic_failed:
+        st.error(
+            "以下基金联网补全失败，相关诊断可能不准确（建议核对代码或暂时剔除）："
+            + "、".join(basic_failed)
+        )
+    elif nav_failed:
+        st.warning(
+            "已获取基本信息，但最新净值拉取失败（市值/浮盈将用本地数据）："
+            + "、".join(nav_failed)
+        )
+    else:
+        st.success("已写回 config/portfolio.yaml，所有基金联网补全成功。")
+
+    rows = []
+    for r in feedback:
+        if r.get("basic_error"):
+            icon = "❌"
+            detail = r["basic_error"]
+        elif r.get("nav_error"):
+            icon = "⚠️"
+            detail = f"净值：{r['nav_error']}"
+        else:
+            icon = "✅"
+            detail = r.get("note") or "—"
+        rows.append(
+            {
+                "代码": r["code"],
+                "状态": icon,
+                "名称": r.get("name") or "—",
+                "类型": r.get("fund_type") or "—",
+                "最新净值": r.get("latest_nav") or "—",
+                "详情": detail,
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
 def render_manage(portfolio: Portfolio) -> None:
     st.subheader("持仓管理")
+
+    # 上一次保存操作的联网补全反馈（跨 st.rerun() 持久显示一次）
+    feedback = st.session_state.pop("manage_resolve_feedback", None)
+    if feedback is not None:
+        _render_resolve_feedback(feedback)
+
     st.caption(
         "📝 录入规则：**只需填 code / 份额 / 成本价 / 建仓日 / 策略**。"
         "基金名称和类型由系统联网自动识别；目标占比上限不填默认 10%。"
@@ -513,6 +587,10 @@ def render_manage(portfolio: Portfolio) -> None:
         )
 
         st.markdown("**目标配置（三项之和 ≈ 1.0）**")
+        st.caption(
+            "以下三项表示**投资部分**（不含现金）的目标比例。"
+            "系统会按当前已投入比例自动缩放，避免因定投未到位就触发欠配告警。"
+        )
         a1, a2, a3 = st.columns(3)
         eq = a1.number_input("股基", 0.0, 1.0, float(portfolio.target_allocation.equity_fund), 0.05)
         bd = a2.number_input("债基", 0.0, 1.0, float(portfolio.target_allocation.bond_fund), 0.05)
@@ -583,12 +661,19 @@ def render_manage(portfolio: Portfolio) -> None:
         st.error(f"转换失败：{type(e).__name__}: {e}")
         return
 
+    resolve_results: list[dict] | None = None
     if resolve_on_save:
-        with st.spinner("联网补全基金名称与类型…"):
-            advisor_mod.resolve_portfolio(new_portfolio)
+        with st.spinner("联网补全基金名称与类型（命中 7 天缓存则不发网络请求）…"):
+            resolve_results = advisor_mod.resolve_portfolio(new_portfolio)
 
     save_portfolio(new_portfolio, PORTFOLIO_PATH)
-    st.success("已写回 config/portfolio.yaml。")
+
+    # 把反馈写进 session_state，让 st.rerun() 之后还能显示（rerun 会清除本轮 UI 输出）
+    if resolve_results is not None:
+        st.session_state["manage_resolve_feedback"] = resolve_results
+    else:
+        st.session_state["manage_resolve_feedback"] = "saved_no_resolve"
+
     st.rerun()
 
 

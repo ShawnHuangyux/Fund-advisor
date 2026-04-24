@@ -78,6 +78,52 @@ def test_under_allocated_info_when_cash_abundant(default_settings):
     assert sig.severity.value == "info"
 
 
+def test_unknown_fund_type_falls_into_equity_bucket(default_settings):
+    """Fix 3：fund_type=None 的基金应被归入 equity_fund 桶，参与超配信号。
+
+    场景：
+    - 一只 fund_type=None 的基金占总资产 40%
+    - 一只普通股基占 20%
+    - cash 40%
+    - invested_value = 60%，等效股基目标 = 0.5 * 0.6 = 30%
+    - 实际股基占比（含未知桶）= 60%
+    - 偏离 = +30% > tolerance 5% → OVER_ALLOCATED_EQUITY_FUND 触发
+
+    旧实现里未知桶归入 "other"（target=0，信号逻辑被跳过），
+    股基实际仅 20% < 等效目标 30%，反而会触发 UNDER（方向相反）。
+    """
+    unknown = make_holding(
+        code="100001",
+        name=None,
+        shares="40000",
+        cost_price="1.0",
+    )
+    unknown.fund_type = None  # 显式设置 None 覆盖 make_holding 的默认 EQUITY
+    eq = make_holding(
+        code="110020",
+        name="易方达沪深300",
+        fund_type=FundType.EQUITY,
+        shares="20000",
+        cost_price="1.0",
+    )
+    p = make_portfolio(
+        cash="40000",
+        principal_total="200000",
+        emergency_reserve="20000",
+        holdings=[unknown, eq],
+    )
+
+    result = position.diagnose(p, default_settings)
+    codes = [s.code for s in result.signals]
+
+    assert "OVER_ALLOCATED_EQUITY_FUND" in codes
+    # 未知桶不应触发 OVER_ALLOCATED_OTHER（"other" 桶不参与信号）
+    assert "OVER_ALLOCATED_OTHER" not in codes
+    # "other" 桶里不应再有这只未知基金
+    other_bucket = next(b for b in result.buckets if b.category == "other")
+    assert other_bucket.actual_value == Decimal("0.00")
+
+
 def test_empty_portfolio_returns_empty(default_settings):
     p = make_portfolio(cash="0", principal_total="100000", emergency_reserve="10000")
     result = position.diagnose(p, default_settings)

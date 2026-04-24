@@ -23,6 +23,7 @@ from ..models import (
     Action,
     ActionItem,
     BUY_ACTIONS,
+    DataQualityReport,
     DiagnosisReport,
     FundType,
     HoldingSnapshot,
@@ -45,6 +46,73 @@ try:
 except Exception:  # pragma: no cover - sqlite 理论上一定存在
     budget_state = None  # type: ignore
     current_month_cost = None  # type: ignore
+
+
+def build_data_quality_report(
+    portfolio: Portfolio, report: DiagnosisReport
+) -> DataQualityReport:
+    """扫描 portfolio 和已生成的诊断子模块，汇总数据完整性元信息。
+
+    口径：
+    - 货基天然不需要历史 nav（压力测试已按 FundType.MONEY 跳过），且 latest_nav
+      会被 enrich_holding_inplace 恒填为 1.0，所以货基不会出现在 missing_* 列表中。
+    - fund_type == UNKNOWN 也算"缺失"——即使 position.py 会把它保守归入 equity_fund
+      桶，用户仍有知情权（参见 position.py 的 fallback 策略 docstring）。
+    """
+    missing_name: list[str] = []
+    missing_fund_type: list[str] = []
+    missing_latest_nav: list[str] = []
+    for h in portfolio.holdings:
+        if not h.name:
+            missing_name.append(h.code)
+        if h.fund_type is None or h.fund_type == FundType.UNKNOWN:
+            missing_fund_type.append(h.code)
+        if h.fund_type != FundType.MONEY and h.latest_nav is None:
+            missing_latest_nav.append(h.code)
+
+    # 从 RiskDiagnosis.stress_tests.missing_funds 汇总去重
+    missing_nav_history: list[str] = []
+    if report.risk_diagnosis and report.risk_diagnosis.stress_tests:
+        seen: set[str] = set()
+        for t in report.risk_diagnosis.stress_tests:
+            for code in t.missing_funds:
+                if code not in seen:
+                    seen.add(code)
+                    missing_nav_history.append(code)
+
+    warnings: list[str] = []
+    if missing_name:
+        warnings.append(
+            f"{len(missing_name)} 只基金缺基金名称（{', '.join(missing_name)}），"
+            "UI 将用代码代替；如是新基金可稍后重试联网补全。"
+        )
+    if missing_fund_type:
+        warnings.append(
+            f"{len(missing_fund_type)} 只基金类型未识别（{', '.join(missing_fund_type)}），"
+            "在仓位诊断中被保守归入 equity_fund 桶；集中度、估值诊断也可能因此偏差。"
+        )
+    if missing_latest_nav:
+        warnings.append(
+            f"{len(missing_latest_nav)} 只基金缺最新净值（{', '.join(missing_latest_nav)}），"
+            "市值/浮盈将使用本地数据，可能滞后于真实行情。"
+        )
+    if missing_nav_history:
+        warnings.append(
+            f"{len(missing_nav_history)} 只基金缺历史净值（{', '.join(missing_nav_history)}），"
+            "这些基金不参与压力测试计算，组合层面的回撤估计可能偏乐观。"
+        )
+
+    overall_complete = not (
+        missing_name or missing_fund_type or missing_latest_nav or missing_nav_history
+    )
+    return DataQualityReport(
+        missing_name=missing_name,
+        missing_fund_type=missing_fund_type,
+        missing_latest_nav=missing_latest_nav,
+        missing_nav_history=missing_nav_history,
+        overall_complete=overall_complete,
+        warnings=warnings,
+    )
 
 
 def resolve_portfolio(portfolio: Portfolio, *, progress: Callable[[str], None] | None = None) -> list[dict]:
@@ -105,6 +173,10 @@ def _fallback_synthesis(report: DiagnosisReport) -> tuple[LLMSynthesis, list[Act
     else:
         headline = "今日无强信号，建议持有观察。"
 
+    caveats = ["本条结论未经 LLM 综合；未结合最新估值温度与压力测试。"]
+    if report.data_quality and not report.data_quality.overall_complete:
+        caveats.extend(report.data_quality.warnings)
+
     synth = LLMSynthesis(
         today_headline=headline,
         overall_assessment=(
@@ -112,7 +184,7 @@ def _fallback_synthesis(report: DiagnosisReport) -> tuple[LLMSynthesis, list[Act
             "仅基于集中度与资金效率给出结论。"
         ),
         risk_warnings=[s.message for s in high_sigs],
-        data_caveats=["本条结论未经 LLM 综合；未结合最新估值温度与压力测试。"],
+        data_caveats=caveats,
         alternative_view="如果你对后续市场方向有明确判断，本兜底结论可能过于保守。",
     )
 
@@ -228,6 +300,8 @@ def run_diagnosis(
         risk_diagnosis=rsk,
         signals=all_signals,
     )
+    # 数据完整性元信息：必须在 LLM synthesize 之前就绪，否则 data_caveats 带不上
+    report.data_quality = build_data_quality_report(portfolio, report)
 
     # Phase 4：月度预算门槛。block 时 deep 模式强制降级为规则兜底。
     if (
@@ -268,6 +342,10 @@ def run_diagnosis(
             synth, items = synthesize_diagnosis(
                 portfolio, report, llm_client, mode=llm_mode
             )
+            # 把数据完整性警告追加到 LLM 产出的 data_caveats 里，
+            # 让 UI 展示的免责说明一定带上"哪些基金数据不完整"。
+            if report.data_quality and not report.data_quality.overall_complete:
+                synth.data_caveats = list(synth.data_caveats) + report.data_quality.warnings
             report.llm_synthesis = synth
             report.action_items = items
             return report

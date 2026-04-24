@@ -11,6 +11,21 @@ actual_ratio 分母取 total_assets（含 cash），所以比较时要把 target
 而不是 total_assets。因此：
     effective_target[bucket] = target_allocation[bucket] * (invested_value / total_assets)
 此口径下，若投入已达计划本金，数值与原口径一致；现金未投完时信号会更温和。
+
+未知 fund_type 的保守降级策略（Fix 3）
+--------------------------------------
+``_bucket_of(None)`` 和 ``_bucket_of(FundType.UNKNOWN)`` 都归入 ``equity_fund``
+桶（而不是 ``other``）。理由：
+
+1. 风险方向保守：``other`` 桶的 ``target_ratio=0`` 且信号逻辑跳过非三大类，
+   意味着一只 fund_type 未识别的基金，不管仓位多大，都永远不会触发任何仓位
+   偏离信号——这是方向错误的静默降级。
+2. 把未知品种视为"波动最高的股基"，宁可误报股基超配也不漏掉风险。
+3. ``other`` 桶保留下来（``target_ratio=0``）是为未来显式的 REIT / 商品分类
+   预留的扩展位，不应被未知类型的基金"污染"。
+
+配套要求：``advisor.build_data_quality_report`` 会同时把这类基金记入
+``DataQualityReport.missing_fund_type``，确保用户知情。
 """
 
 from __future__ import annotations
@@ -37,6 +52,9 @@ def _bucket_of(fund_type: FundType | None) -> str:
     if fund_type == FundType.MONEY:
         return "money_fund"
     if fund_type in (FundType.EQUITY, FundType.HYBRID, FundType.QDII):
+        return "equity_fund"
+    # 未知 / None：保守降级为 equity_fund（见模块 docstring），而不是 other。
+    if fund_type is None or fund_type == FundType.UNKNOWN:
         return "equity_fund"
     return "other"
 

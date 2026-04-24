@@ -113,13 +113,22 @@ class Holding(BaseModel):
 
 
 class TargetAllocation(BaseModel):
-    """目标配置比例（三大类）。"""
+    """目标配置比例（三大类）。
+
+    ⚠️ 这三项表示**投资部分**（invested_value，不含现金）的目标比例，
+    三项之和 ≈ 1.0。``diagnostics/position.py`` 会按当前
+    ``invested_value / total_assets`` 自动缩放成"含现金口径"的等效目标，
+    避免因定投未到位（现金未投完）就触发欠配告警。
+
+    UI 持仓管理 tab 展示的也是这个"投资部分占比"口径；诊断报告的仓位
+    表格则同时展示原始目标和缩放后的等效目标。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    equity_fund: Ratio = Field(description="股基目标占比")
-    bond_fund: Ratio = Field(description="债基目标占比")
-    money_fund: Ratio = Field(description="货基目标占比")
+    equity_fund: Ratio = Field(description="股基目标占比（占投资部分）")
+    bond_fund: Ratio = Field(description="债基目标占比（占投资部分）")
+    money_fund: Ratio = Field(description="货基目标占比（占投资部分）")
 
     @model_validator(mode="after")
     def _sum_to_one(self) -> "TargetAllocation":
