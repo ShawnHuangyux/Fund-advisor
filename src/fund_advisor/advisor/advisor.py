@@ -139,7 +139,7 @@ def build_summary(portfolio: Portfolio) -> PortfolioSummary:
             market_value=h.market_value,
             pnl=h.pnl,
             pnl_pct=h.pnl_pct,
-            held_days=(today - h.purchase_date).days,
+            held_days=None if h.purchase_date is None else (today - h.purchase_date).days,
         )
         for h in portfolio.holdings
     ]

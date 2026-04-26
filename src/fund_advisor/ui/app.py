@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import os
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 import plotly.express as px
@@ -31,15 +33,17 @@ from fund_advisor.data.akshare_client import (
 )
 from fund_advisor.models import (
     Action,
+    CapitalState,
     CandidateRequest,
+    DCAPlan,
+    DEFAULT_MAX_DRAWDOWN_TOLERANCE,
     DiagnosisReport,
     FundType,
     Holding,
+    PlanFrequency,
     Portfolio,
-    RiskTolerance,
     Settings,
     Strategy,
-    TargetAllocation,
     normalize_fund_type,
 )
 
@@ -76,6 +80,33 @@ ACTION_LABEL = {
 }
 
 PRIORITY_ICON = {"high": "🚨", "medium": "⚠️", "low": "ℹ️"}
+_HOLDINGS_EDITOR_COLUMNS = [
+    "code",
+    "shares",
+    "average_cost",
+    "notes",
+    "(自动)名称",
+    "(自动)类型",
+]
+_DCA_PLAN_EDITOR_COLUMNS = [
+    "code",
+    "amount_rmb",
+    "frequency",
+    "start_date",
+    "enabled",
+    "notes",
+    "(自动)名称",
+    "(自动)类型",
+]
+_FUND_TYPE_LABELS = {
+    FundType.EQUITY: "股票基金",
+    FundType.BOND: "债券基金",
+    FundType.MONEY: "货币基金",
+    FundType.HYBRID: "混合基金",
+    FundType.QDII: "QDII",
+    FundType.UNKNOWN: "未知",
+}
+_FUND_TYPE_LABEL_TO_ENUM = {label: fund_type for fund_type, label in _FUND_TYPE_LABELS.items()}
 
 
 # ------------------- 加载器 -------------------
@@ -106,6 +137,190 @@ def _get_llm_client() -> "DeepSeekClient | None":
     if build_deepseek_client is None:
         return None
     return build_deepseek_client()
+
+
+def _normalize_editor_code(value: object) -> str | None:
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, int):
+        raw = str(value)
+    elif isinstance(value, float) and value.is_integer():
+        raw = str(int(value))
+    else:
+        raw = str(value).strip()
+    if not raw:
+        return None
+    if raw.isdigit() and len(raw) <= 6:
+        return raw.zfill(6)
+    return raw
+
+
+def _fund_type_label(fund_type: FundType | None) -> str:
+    if fund_type is None:
+        return ""
+    return _FUND_TYPE_LABELS.get(fund_type, fund_type.value)
+
+
+def _fund_type_from_label(value: object) -> FundType | None:
+    if value is None or pd.isna(value):
+        return None
+    label = str(value).strip()
+    if not label:
+        return None
+    if label in _FUND_TYPE_LABEL_TO_ENUM:
+        return _FUND_TYPE_LABEL_TO_ENUM[label]
+    try:
+        return FundType(label)
+    except ValueError:
+        return None
+
+
+def _holding_auto_metadata(
+    row: dict[str, object], original_code: str | None
+) -> tuple[str | None, FundType | None]:
+    current_code = _normalize_editor_code(row.get("code"))
+    original_code_normalized = _normalize_editor_code(original_code)
+    if current_code is None or current_code != original_code_normalized:
+        return None, None
+
+    raw_name = row.get("(自动)名称")
+    name = None
+    if raw_name is not None and not pd.isna(raw_name):
+        name = str(raw_name).strip() or None
+
+    raw_type = row.get("(自动)类型")
+    fund_type = _fund_type_from_label(raw_type)
+
+    return name, fund_type
+
+
+def _holding_strategy(position: int, original_holdings: list[Holding]) -> Strategy:
+    if position < len(original_holdings):
+        return original_holdings[position].strategy
+    return Strategy.HOLD
+
+
+def _build_holdings_from_editor(
+    edited: pd.DataFrame, original_holdings: list[Holding]
+) -> list[Holding]:
+    holdings: list[Holding] = []
+    for position, row in enumerate(edited.to_dict("records")):
+        code = _normalize_editor_code(row.get("code"))
+        if not code:
+            continue
+
+        original_code = (
+            original_holdings[position].code if position < len(original_holdings) else None
+        )
+        name, fund_type = _holding_auto_metadata(row, original_code)
+        strategy = _holding_strategy(position, original_holdings)
+
+        raw_notes = row.get("notes")
+        notes = None
+        if raw_notes is not None and not pd.isna(raw_notes):
+            notes = str(raw_notes).strip() or None
+
+        holdings.append(
+            Holding(
+                code=code,
+                name=name,
+                fund_type=fund_type,
+                shares=Decimal(str(row["shares"])),
+                average_cost=Decimal(str(row["average_cost"])),
+                strategy=strategy,
+                notes=notes,
+            )
+        )
+    return holdings
+
+
+def _dca_schedule_fields(
+    frequency: PlanFrequency, start_date: date
+) -> tuple[int | None, int | None]:
+    if frequency == PlanFrequency.WEEKLY:
+        return start_date.weekday(), None
+    if frequency == PlanFrequency.MONTHLY:
+        return None, start_date.day
+    return None, None
+
+
+def _dca_plan_entry_df(portfolio: Portfolio) -> pd.DataFrame:
+    rows = [
+        {
+            "code": p.code,
+            "amount_rmb": float(p.amount_rmb),
+            "frequency": p.frequency.value,
+            "start_date": p.start_date,
+            "enabled": p.enabled,
+            "notes": p.notes or "",
+            "(自动)名称": p.name or "",
+            "(自动)类型": _fund_type_label(p.fund_type),
+        }
+        for p in portfolio.dca_plans
+    ]
+    return pd.DataFrame(rows, columns=_DCA_PLAN_EDITOR_COLUMNS)
+
+
+def _build_dca_plans_from_editor(
+    edited: pd.DataFrame, original_plans: list[DCAPlan]
+) -> list[DCAPlan]:
+    plans: list[DCAPlan] = []
+    for position, row in enumerate(edited.to_dict("records")):
+        code = _normalize_editor_code(row.get("code"))
+        if not code:
+            continue
+
+        original_code = (
+            original_plans[position].code if position < len(original_plans) else None
+        )
+        name, fund_type = _holding_auto_metadata(row, original_code)
+
+        raw_notes = row.get("notes")
+        notes = None
+        if raw_notes is not None and not pd.isna(raw_notes):
+            notes = str(raw_notes).strip() or None
+
+        frequency = PlanFrequency(str(row.get("frequency") or PlanFrequency.DAILY.value))
+        start_date = row["start_date"]
+        day_of_week, day_of_month = _dca_schedule_fields(frequency, start_date)
+
+        plans.append(
+            DCAPlan(
+                code=code,
+                name=name,
+                fund_type=fund_type,
+                amount_rmb=Decimal(str(row["amount_rmb"])),
+                frequency=frequency,
+                start_date=start_date,
+                enabled=bool(row.get("enabled", True)),
+                day_of_week=day_of_week,
+                day_of_month=day_of_month,
+                notes=notes,
+            )
+        )
+    return plans
+
+
+def _resolve_dca_plans(dca_plans: list[DCAPlan]) -> list[dict]:
+    reports: list[dict] = []
+    for plan in dca_plans:
+        changes: dict[str, object] = {"code": plan.code, "entity": "dca_plan"}
+        need_basic = not plan.name or plan.fund_type is None
+        if not need_basic:
+            reports.append(changes)
+            continue
+        try:
+            info = get_basic_info(plan.code)
+            if not plan.name:
+                plan.name = info["name"]
+                changes["name"] = info["name"]
+            if plan.fund_type is None:
+                plan.fund_type = normalize_fund_type(info.get("fund_type_raw", ""))
+                changes["fund_type"] = plan.fund_type.value
+        except FundDataError as e:
+            changes["basic_error"] = str(e)
+        reports.append(changes)
+    return reports
 
 
 def _render_risk_section(rd) -> None:
@@ -359,7 +574,7 @@ def render_today(portfolio: Portfolio, settings: Settings) -> None:
                         {
                             "代码": it.fund_code,
                             "名称": it.fund_name,
-                            "持有天数": it.held_days,
+                            "持有天数": it.held_days if it.held_days is not None else "—",
                             "浮盈亏": float(it.pnl),
                             "收益率": f"{float(it.pnl_pct) * 100:+.2f}%",
                             "年化(近似)": (
@@ -441,9 +656,9 @@ def render_overview(portfolio: Portfolio) -> None:
         {
             "代码": h.code,
             "名称": h.name or "(待联网补齐)",
-            "类型": (h.fund_type.value if h.fund_type else "(待联网补齐)"),
+            "类型": (_fund_type_label(h.fund_type) or "(待联网补齐)"),
             "份额": float(h.shares),
-            "成本价": float(h.cost_price),
+            "平均成本": float(h.cost_price),
             "最新净值": (float(h.latest_nav) if h.latest_nav else None),
             "净值日期": (
                 h.latest_nav_date.isoformat() if h.latest_nav_date else ""
@@ -474,25 +689,46 @@ def render_overview(portfolio: Portfolio) -> None:
         st.markdown("**持仓明细**")
         st.dataframe(df, use_container_width=True, hide_index=True)
 
+    st.markdown("**当前定投计划**")
+    if not portfolio.dca_plans:
+        st.caption("暂无启用中的定投计划。")
+    else:
+        plans_df = pd.DataFrame(
+            [
+                {
+                    "代码": p.code,
+                    "名称": p.name or "—",
+                    "类型": _fund_type_label(p.fund_type) or "—",
+                    "每期金额": float(p.amount_rmb),
+                    "频率": {
+                        "daily": "每天",
+                        "weekly": "每周",
+                        "monthly": "每月",
+                    }.get(p.frequency.value, p.frequency.value),
+                    "开始日期": p.start_date.isoformat(),
+                    "状态": "启用中" if p.enabled else "已停用",
+                    "备注": p.notes or "",
+                }
+                for p in portfolio.dca_plans
+            ]
+        )
+        st.dataframe(plans_df, use_container_width=True, hide_index=True)
+
 
 # ------------------- Tab 3：持仓管理（极简录入） -------------------
 def _holdings_entry_df(portfolio: Portfolio) -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "code": h.code,
-                "shares": float(h.shares),
-                "cost_price": float(h.cost_price),
-                "purchase_date": h.purchase_date,
-                "strategy": h.strategy.value,
-                "target_allocation": float(h.target_allocation),
-                "notes": h.notes or "",
-                "(自动)名称": h.name or "",
-                "(自动)类型": (h.fund_type.value if h.fund_type else ""),
-            }
-            for h in portfolio.holdings
-        ]
-    )
+    rows = [
+        {
+            "code": h.code,
+            "shares": float(h.shares),
+            "average_cost": float(h.cost_price),
+            "notes": h.notes or "",
+            "(自动)名称": h.name or "",
+            "(自动)类型": _fund_type_label(h.fund_type),
+        }
+        for h in portfolio.holdings
+    ]
+    return pd.DataFrame(rows, columns=_HOLDINGS_EDITOR_COLUMNS)
 
 
 def _render_resolve_feedback(feedback: object) -> None:
@@ -536,10 +772,11 @@ def _render_resolve_feedback(feedback: object) -> None:
             detail = r.get("note") or "—"
         rows.append(
             {
+                "对象": "定投计划" if r.get("entity") == "dca_plan" else "持仓",
                 "代码": r["code"],
                 "状态": icon,
                 "名称": r.get("name") or "—",
-                "类型": r.get("fund_type") or "—",
+                "类型": _fund_type_label(_fund_type_from_label(r.get("fund_type"))) or "—",
                 "最新净值": r.get("latest_nav") or "—",
                 "详情": detail,
             }
@@ -556,9 +793,14 @@ def render_manage(portfolio: Portfolio) -> None:
         _render_resolve_feedback(feedback)
 
     st.caption(
-        "📝 录入规则：**只需填 code / 份额 / 成本价 / 建仓日 / 策略**。"
-        "基金名称和类型由系统联网自动识别；目标占比上限不填默认 10%。"
+        "📝 当前持仓只记录你现在真实持有的份额和平均成本；"
+        "当前定投计划单独维护未来的持续买入安排。"
         "提交后会先备份原 YAML（`config/portfolio.yaml.backup-<时间戳>`）再原子写回。"
+    )
+    st.caption(
+        "当前版本已简化：组合层风险和大类配置使用内置默认值，"
+        f"即最大回撤 {float(DEFAULT_MAX_DRAWDOWN_TOLERANCE) * 100:.0f}%、"
+        "股/债/货 = 50/30/20。"
     )
 
     with st.form("portfolio_form"):
@@ -567,7 +809,7 @@ def render_manage(portfolio: Portfolio) -> None:
             "可用现金 (¥)", min_value=0.0, value=float(portfolio.cash), step=100.0
         )
         principal = c2.number_input(
-            "计划总本金 (¥)", min_value=0.0,
+            "目标投入规模 (¥)", min_value=0.0,
             value=float(portfolio.principal_total), step=1000.0,
         )
         reserve = c3.number_input(
@@ -575,28 +817,7 @@ def render_manage(portfolio: Portfolio) -> None:
             value=float(portfolio.emergency_reserve), step=500.0,
         )
 
-        c4, c5 = st.columns(2)
-        risk = c4.selectbox(
-            "风险承受度",
-            options=[r.value for r in RiskTolerance],
-            index=[r.value for r in RiskTolerance].index(portfolio.risk_tolerance.value),
-        )
-        drawdown = c5.number_input(
-            "最大可承受回撤 (0-1)", 0.0, 1.0,
-            float(portfolio.max_drawdown_tolerance), 0.01,
-        )
-
-        st.markdown("**目标配置（三项之和 ≈ 1.0）**")
-        st.caption(
-            "以下三项表示**投资部分**（不含现金）的目标比例。"
-            "系统会按当前已投入比例自动缩放，避免因定投未到位就触发欠配告警。"
-        )
-        a1, a2, a3 = st.columns(3)
-        eq = a1.number_input("股基", 0.0, 1.0, float(portfolio.target_allocation.equity_fund), 0.05)
-        bd = a2.number_input("债基", 0.0, 1.0, float(portfolio.target_allocation.bond_fund), 0.05)
-        mm = a3.number_input("货基", 0.0, 1.0, float(portfolio.target_allocation.money_fund), 0.05)
-
-        st.markdown("**持仓**（下表可直接增删改行；**(自动)** 列不用填）")
+        st.markdown("**当前持仓**（只记录你已经持有的基金）")
         edited = st.data_editor(
             _holdings_entry_df(portfolio),
             num_rows="dynamic",
@@ -604,10 +825,29 @@ def render_manage(portfolio: Portfolio) -> None:
             column_config={
                 "code": st.column_config.TextColumn("代码*", required=True, help="6 位基金代码，如 017513"),
                 "shares": st.column_config.NumberColumn("份额*", min_value=0.0, format="%.4f", required=True),
-                "cost_price": st.column_config.NumberColumn("成本价*", min_value=0.0001, format="%.4f", required=True),
-                "purchase_date": st.column_config.DateColumn("建仓日*", required=True),
-                "strategy": st.column_config.SelectboxColumn("策略", options=[s.value for s in Strategy], default=Strategy.DCA.value),
-                "target_allocation": st.column_config.NumberColumn("上限占比", min_value=0.0, max_value=1.0, format="%.4f", default=0.10, help="不填默认 10%"),
+                "average_cost": st.column_config.NumberColumn("平均成本*", min_value=0.0001, format="%.4f", required=True),
+                "notes": st.column_config.TextColumn("备注"),
+                "(自动)名称": st.column_config.TextColumn("(自动)名称", disabled=True),
+                "(自动)类型": st.column_config.TextColumn("(自动)类型", disabled=True),
+            },
+            disabled=["(自动)名称", "(自动)类型"],
+        )
+
+        st.markdown("**当前定投计划**（不主动停用就持续生效）")
+        edited_plans = st.data_editor(
+            _dca_plan_entry_df(portfolio),
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "code": st.column_config.TextColumn("代码*", required=True, help="6 位基金代码，如 017513"),
+                "amount_rmb": st.column_config.NumberColumn("每期金额*", min_value=0.01, format="%.2f", required=True),
+                "frequency": st.column_config.SelectboxColumn(
+                    "频率",
+                    options=[f.value for f in PlanFrequency],
+                    default=PlanFrequency.DAILY.value,
+                ),
+                "start_date": st.column_config.DateColumn("开始日期*", required=True),
+                "enabled": st.column_config.CheckboxColumn("启用"),
                 "notes": st.column_config.TextColumn("备注"),
                 "(自动)名称": st.column_config.TextColumn("(自动)名称", disabled=True),
                 "(自动)类型": st.column_config.TextColumn("(自动)类型", disabled=True),
@@ -622,36 +862,17 @@ def render_manage(portfolio: Portfolio) -> None:
         return
 
     try:
-        new_holdings = []
-        for _, row in edited.iterrows():
-            if pd.isna(row.get("code")) or str(row["code"]).strip() == "":
-                continue
-            new_holdings.append(
-                Holding(
-                    code=str(row["code"]),
-                    name=(str(row["(自动)名称"]).strip() or None) if row.get("(自动)名称") is not None else None,
-                    fund_type=(FundType(row["(自动)类型"]) if row.get("(自动)类型") else None),
-                    shares=Decimal(str(row["shares"])),
-                    cost_price=Decimal(str(row["cost_price"])),
-                    purchase_date=row["purchase_date"],
-                    strategy=Strategy(row.get("strategy") or Strategy.DCA.value),
-                    target_allocation=Decimal(str(row.get("target_allocation") or 0.10)),
-                    notes=(None if pd.isna(row.get("notes")) or str(row["notes"]).strip() == "" else str(row["notes"])),
-                )
-            )
+        new_holdings = _build_holdings_from_editor(edited, portfolio.holdings)
+        new_dca_plans = _build_dca_plans_from_editor(edited_plans, portfolio.dca_plans)
 
         new_portfolio = Portfolio(
-            cash=Decimal(str(cash)),
-            principal_total=Decimal(str(principal)),
-            emergency_reserve=Decimal(str(reserve)),
-            risk_tolerance=RiskTolerance(risk),
-            max_drawdown_tolerance=Decimal(str(drawdown)),
-            target_allocation=TargetAllocation(
-                equity_fund=Decimal(str(eq)),
-                bond_fund=Decimal(str(bd)),
-                money_fund=Decimal(str(mm)),
+            capital=CapitalState(
+                available_cash=Decimal(str(cash)),
+                emergency_reserve=Decimal(str(reserve)),
+                target_portfolio_budget=Decimal(str(principal)),
             ),
             holdings=new_holdings,
+            dca_plans=new_dca_plans,
         )
     except ValidationError as e:
         st.error("校验失败，未写入：")
@@ -665,6 +886,7 @@ def render_manage(portfolio: Portfolio) -> None:
     if resolve_on_save:
         with st.spinner("联网补全基金名称与类型（命中 7 天缓存则不发网络请求）…"):
             resolve_results = advisor_mod.resolve_portfolio(new_portfolio)
+            resolve_results.extend(_resolve_dca_plans(new_portfolio.dca_plans))
 
     save_portfolio(new_portfolio, PORTFOLIO_PATH)
 
@@ -818,6 +1040,32 @@ def _cached_index_valuation(symbol: str) -> dict:
     }
 
 
+def _refresh_portfolio_latest_navs(
+    portfolio: Portfolio,
+    *,
+    fetch_latest_nav: Callable[[str], dict] | None = None,
+) -> None:
+    fetch_nav = fetch_latest_nav or (lambda code: get_latest_nav(code, use_cache=False))
+    for holding in portfolio.holdings:
+        if holding.fund_type == FundType.MONEY:
+            holding.latest_nav = Decimal("1.0")
+            holding.latest_nav_date = date.today()
+            continue
+        try:
+            nav = fetch_nav(holding.code)
+        except FundDataError:
+            continue
+        holding.latest_nav = nav["nav"]
+        holding.latest_nav_date = nav["nav_date"]
+
+
+def _fund_detail_latest_nav(selected: Holding, rows: list[dict]) -> tuple[float | Decimal | None, object]:
+    if rows:
+        last = rows[-1]
+        return last.get("nav"), last.get("date")
+    return selected.latest_nav, selected.latest_nav_date
+
+
 def render_fund_detail(portfolio: Portfolio) -> None:
     st.subheader("基金明细")
     st.caption("选择一只持仓，查看近 3 年净值曲线与对应指数估值分位（若能匹配）。")
@@ -835,15 +1083,6 @@ def render_fund_detail(portfolio: Portfolio) -> None:
 
     years = st.slider("净值曲线年限", 1, 5, 3)
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric(
-        "最新净值",
-        f"{selected.latest_nav}" if selected.latest_nav else "—",
-        f"截至 {selected.latest_nav_date}" if selected.latest_nav_date else None,
-    )
-    c2.metric("成本价", f"{selected.cost_price}")
-    c3.metric("持有天数", f"{(pd.Timestamp.today().date() - selected.purchase_date).days}")
-
     # ---- 净值曲线 ----
     try:
         with st.spinner(f"加载 {selected_code} 近 {years} 年净值…"):
@@ -852,13 +1091,29 @@ def render_fund_detail(portfolio: Portfolio) -> None:
         st.warning(f"净值曲线不可用：{e}")
         rows = []
 
+    latest_nav, latest_nav_date = _fund_detail_latest_nav(selected, rows)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric(
+        "最新净值",
+        f"{latest_nav}" if latest_nav is not None else "—",
+        f"截至 {latest_nav_date}" if latest_nav_date else None,
+    )
+    c2.metric("平均成本", f"{selected.cost_price}")
+    held_days = (
+        None
+        if selected.purchase_date is None
+        else (pd.Timestamp.today().date() - selected.purchase_date).days
+    )
+    c3.metric("持有天数", f"{held_days}" if held_days is not None else "—")
+
     if rows:
         df_nav = pd.DataFrame(rows)
         fig = px.line(df_nav, x="date", y="nav", title=f"{selected_code} 近 {years} 年单位净值")
         fig.add_hline(
             y=float(selected.cost_price),
             line_dash="dash",
-            annotation_text=f"成本价 {selected.cost_price}",
+            annotation_text=f"平均成本 {selected.cost_price}",
             annotation_position="bottom right",
         )
         st.plotly_chart(fig, use_container_width=True)
@@ -965,6 +1220,13 @@ def main() -> None:
 
     settings = _get_settings()
     portfolio = _get_portfolio()
+    portfolio_mtime = PORTFOLIO_PATH.stat().st_mtime if PORTFOLIO_PATH.exists() else 0.0
+    if portfolio is not None:
+        nav_refresh_key = st.session_state.get("_portfolio_nav_refresh_key")
+        if nav_refresh_key != portfolio_mtime:
+            with st.spinner("联网更新持仓最新净值…"):
+                _refresh_portfolio_latest_navs(portfolio)
+            st.session_state["_portfolio_nav_refresh_key"] = portfolio_mtime
 
     with st.sidebar:
         st.header("数据与状态")

@@ -1,46 +1,14 @@
-cash: '10000.0'
-principal_total: '5000.0'
-emergency_reserve: '5000.0'
-risk_tolerance: moderate
-max_drawdown_tolerance: '0.15'
-target_allocation:
-  equity_fund: '0.5'
-  bond_fund: '0.3'
-  money_fund: '0.2'
+capital:
+  available_cash: 5000.0
+  emergency_reserve: 5000.0
+  monthly_expense: null
+  target_portfolio_budget: 10000.0
 holdings:
-- code: '017513'
-  name: 广发北证50成份指数C
-  fund_type: equity_fund
-  shares: '3000.0'
-  cost_price: '1.25'
-  purchase_date: '2025-08-15'
-  target_allocation: '0.1'
-  strategy: DCA
-  notes: 北证波动大，仅定投
-- code: 017812
-  name: 东方人工智能主题混合C
-  fund_type: equity_fund
-  shares: '2000.0'
-  cost_price: '1.8'
-  purchase_date: '2024-11-01'
-  target_allocation: '0.25'
-  strategy: DCA
-  notes: 宽基打底
-- code: 000914
-  name: 中加纯债债券A
-  fund_type: bond_fund
-  shares: '5000.0'
-  cost_price: '1.05'
-  purchase_date: '2024-09-20'
-  target_allocation: '0.3'
-  strategy: hold
-  notes: 纯债防御
-- code: '000307'
-  name: 华夏现金增利货币A
-  fund_type: money_fund
-  shares: '8000.0'
-  cost_price: '1.0'
-  purchase_date: '2024-07-10'
-  target_allocation: '0.2'
-  strategy: hold
-  notes: 流动性备用
+  - code: "017512"
+    name: 广发北证50成份指数A
+    fund_type: equity_fund
+    shares: 15073.94
+    average_cost: 1.6703
+    notes: null
+dca_plans: []
+transactions: []

@@ -31,13 +31,19 @@ from .diagnosis import (
 )
 from .fund import FundBasicInfo, FundRiskClass, normalize_fund_type
 from .portfolio import (
+    CapitalState,
+    DCAPlan,
     DEFAULT_TARGET_ALLOCATION,
+    DEFAULT_MAX_DRAWDOWN_TOLERANCE,
     FundType,
     Holding,
+    PlanFrequency,
     Portfolio,
     RiskTolerance,
     Strategy,
     TargetAllocation,
+    TransactionRecord,
+    TransactionType,
 )
 from .settings import SchedulerSettings, Settings
 
@@ -47,6 +53,7 @@ __all__ = [
     "Action",
     "ActionItem",
     "AllocationBucket",
+    "CapitalState",
     "CandidateAnalysis",
     "CandidateRequest",
     "CapitalDiagnosis",
@@ -54,6 +61,8 @@ __all__ = [
     "ConcentrationItem",
     "CostDiagnosis",
     "CostItem",
+    "DCAPlan",
+    "DEFAULT_MAX_DRAWDOWN_TOLERANCE",
     "DEFAULT_TARGET_ALLOCATION",
     "DataQualityReport",
     "DiagnosisReport",
@@ -64,6 +73,7 @@ __all__ = [
     "Holding",
     "HoldingSnapshot",
     "LLMSynthesis",
+    "PlanFrequency",
     "Portfolio",
     "PortfolioSummary",
     "PositionDiagnosis",
@@ -77,6 +87,8 @@ __all__ = [
     "Strategy",
     "StressTestResult",
     "TargetAllocation",
+    "TransactionRecord",
+    "TransactionType",
     "ValuationDiagnosis",
     "ValuationItem",
     "ValuationStatus",

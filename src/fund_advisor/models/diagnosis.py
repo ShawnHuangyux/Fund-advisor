@@ -158,7 +158,7 @@ class CostItem(BaseModel):
     cost_value: Decimal
     pnl: Decimal
     pnl_pct: Decimal
-    held_days: int
+    held_days: int | None = None
     annualized_return: Decimal | None = Field(
         default=None, description="简单年化收益率（近似 IRR）"
     )
@@ -256,7 +256,7 @@ class HoldingSnapshot(BaseModel):
     market_value: Decimal
     pnl: Decimal
     pnl_pct: Decimal
-    held_days: int
+    held_days: int | None = None
 
 
 class PortfolioSummary(BaseModel):

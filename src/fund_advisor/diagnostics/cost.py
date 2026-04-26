@@ -95,14 +95,14 @@ def diagnose(portfolio: Portfolio, settings: Settings) -> CostDiagnosis:
     signals: list[Signal] = []
 
     for h in portfolio.holdings:
-        held_days = max(0, (today - h.purchase_date).days)
+        held_days = None if h.purchase_date is None else max(0, (today - h.purchase_date).days)
         name = h.name or h.code
         is_c = _is_c_class(name)
 
         current_rate: Decimal | None = None
         next_tier_days_away: int | None = None
 
-        if is_c:
+        if is_c and held_days is not None:
             tiers = _resolve_fee_tiers(h.code, settings)
             current = _current_tier(tiers, held_days)
             current_rate = current.rate if current else None
@@ -147,7 +147,11 @@ def diagnose(portfolio: Portfolio, settings: Settings) -> CostDiagnosis:
                         )
                     )
 
-        ann = _annualized_return(h.cost_value, h.market_value, held_days)
+        ann = (
+            _annualized_return(h.cost_value, h.market_value, held_days)
+            if held_days is not None
+            else None
+        )
 
         items.append(
             CostItem(

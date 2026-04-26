@@ -26,12 +26,16 @@ def _safe_div(num: Decimal, den: Decimal, quantize: str = "0.0001") -> Decimal:
 def diagnose(portfolio: Portfolio, settings: Settings) -> CapitalDiagnosis:
     cap_cfg = settings.capital
     invested = portfolio.invested_value
-    investable = (portfolio.principal_total - portfolio.emergency_reserve).quantize(
-        Decimal("0.01")
-    )
+    if portfolio.target_portfolio_budget is not None:
+        investable = (
+            portfolio.target_portfolio_budget - portfolio.emergency_reserve
+        ).quantize(Decimal("0.01"))
+    else:
+        investable = (invested + portfolio.cash).quantize(Decimal("0.01"))
     utilization = _safe_div(invested, investable)
+    has_investable_principal = investable > _DEC_ZERO
 
-    monthly_expense = cap_cfg.monthly_expense_default
+    monthly_expense = portfolio.monthly_expense or cap_cfg.monthly_expense_default
     adequacy_months = _safe_div(
         portfolio.emergency_reserve, monthly_expense, quantize="0.01"
     )
@@ -67,7 +71,10 @@ def diagnose(portfolio: Portfolio, settings: Settings) -> CapitalDiagnosis:
             )
         )
 
-    if utilization < cap_cfg.capital_under_utilization_threshold:
+    if (
+        has_investable_principal
+        and utilization < cap_cfg.capital_under_utilization_threshold
+    ):
         signals.append(
             Signal(
                 code="CAPITAL_UNDERUTILIZED",

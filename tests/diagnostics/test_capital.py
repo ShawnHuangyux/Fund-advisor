@@ -66,3 +66,4 @@ def test_zero_investable_principal_safe(default_settings):
     result = capital.diagnose(p, default_settings)
     assert result.investable_principal == Decimal("0.00")
     assert result.capital_utilization == Decimal("0")
+    assert not any(s.code == "CAPITAL_UNDERUTILIZED" for s in result.signals)

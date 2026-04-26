@@ -19,6 +19,7 @@ from ..models import (
     LLMSynthesis,
     Portfolio,
     REDEEM_ACTIONS,
+    RiskTolerance,
 )
 from .client import DeepSeekClient
 from .prompts import (
@@ -39,20 +40,48 @@ def _holdings_block(portfolio: Portfolio) -> str:
     lines = []
     today = date.today()
     for h in portfolio.holdings:
-        held_days = (today - h.purchase_date).days
+        held_days = None if h.purchase_date is None else (today - h.purchase_date).days
         nav_str = (
             f"¥{h.latest_nav} ({h.latest_nav_date})"
             if h.latest_nav
             else "无实时净值，按成本价估算"
         )
         pnl_sign = "+" if h.pnl >= 0 else ""
+        held_days_str = f"持有 {held_days} 天" if held_days is not None else "持有天数未知"
         lines.append(
             f"- {h.code} {h.name or '(待查)'} [{(h.fund_type or FundType.UNKNOWN).value}] "
             f"份额 {h.shares}, 成本 ¥{h.cost_price}, 最新 {nav_str}, "
             f"市值 ¥{h.market_value}, 浮盈亏 {pnl_sign}¥{h.pnl} ({pnl_sign}{h.pnl_pct * 100:.2f}%), "
-            f"持有 {held_days} 天，策略 {h.strategy.value}"
+            f"{held_days_str}"
         )
     return "\n".join(lines) if lines else "（当前无持仓）"
+
+
+def _dca_plans_block(portfolio: Portfolio) -> str:
+    if not portfolio.dca_plans:
+        return "（当前无定投计划）"
+    lines = []
+    weekday_labels = {
+        0: "周一",
+        1: "周二",
+        2: "周三",
+        3: "周四",
+        4: "周五",
+        5: "周六",
+        6: "周日",
+    }
+    for plan in portfolio.dca_plans:
+        schedule = {
+            "daily": "每天",
+            "weekly": f"每周 {weekday_labels.get(plan.start_date.weekday(), '—')}",
+            "monthly": f"每月 {plan.start_date.day} 日",
+        }.get(plan.frequency.value, plan.frequency.value)
+        status = "启用中" if plan.enabled else "已停用"
+        lines.append(
+            f"- {plan.code} {plan.name or '(待查)'}: 每期 ¥{plan.amount_rmb}, {schedule}, "
+            f"{status}, 开始于 {plan.start_date}"
+        )
+    return "\n".join(lines)
 
 
 def _concentration_block(report: DiagnosisReport) -> str:
@@ -107,6 +136,7 @@ def _cost_block(report: DiagnosisReport) -> str:
         return "（无成本数据）"
     lines = []
     for it in cst.items:
+        held_days = f"持 {it.held_days} 天" if it.held_days is not None else "持有天数未知"
         ann = (
             f"年化 {float(it.annualized_return) * 100:+.2f}%"
             if it.annualized_return is not None
@@ -120,7 +150,7 @@ def _cost_block(report: DiagnosisReport) -> str:
             else:
                 cclass = f"，C 类当前赎回费 {cur}（已最优）"
         lines.append(
-            f"  - {it.fund_code} {it.fund_name}: 持 {it.held_days} 天, "
+            f"  - {it.fund_code} {it.fund_name}: {held_days}, "
             f"浮盈亏 ¥{it.pnl} ({float(it.pnl_pct) * 100:+.2f}%), {ann}{cclass}"
         )
     return "\n".join(lines)
@@ -208,12 +238,13 @@ def synthesize_diagnosis(
         total_pnl=_fmt(summary.total_pnl),
         principal_total=_fmt(portfolio.principal_total),
         emergency_reserve=_fmt(portfolio.emergency_reserve),
-        risk_tolerance=portfolio.risk_tolerance.value,
+        risk_tolerance=RiskTolerance.MODERATE.value,
         max_drawdown_tolerance=f"{float(portfolio.max_drawdown_tolerance)*100:.0f}%",
         target_eq=f"{float(portfolio.target_allocation.equity_fund)*100:.0f}%",
         target_bd=f"{float(portfolio.target_allocation.bond_fund)*100:.0f}%",
         target_mm=f"{float(portfolio.target_allocation.money_fund)*100:.0f}%",
         holdings_block=_holdings_block(portfolio),
+        dca_plans_block=_dca_plans_block(portfolio),
         utilization=f"{float(cap.capital_utilization)*100:.2f}%",
         util_threshold="50%",
         emergency_months=_fmt(cap.emergency_adequacy_months),
@@ -301,6 +332,20 @@ def _safe_float(v) -> float | None:
         return None
 
 
+def _safe_bool(v) -> bool | None:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float, Decimal)):
+        return bool(v)
+    if isinstance(v, str):
+        normalized = v.strip().lower()
+        if normalized in {"true", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "no", "n", ""}:
+            return False
+    return None
+
+
 def analyze_candidate(
     portfolio: Portfolio,
     req: CandidateRequest,
@@ -340,6 +385,7 @@ def analyze_candidate(
 
     amount = parsed.get("suggested_amount_rmb")
     amount_dec = None if amount in (None, "", "null") else Decimal(str(amount))
+    should_buy = _safe_bool(parsed.get("should_buy"))
 
     return CandidateAnalysis(
         code=req.code,
@@ -348,7 +394,7 @@ def analyze_candidate(
         latest_nav=(nav_info["nav"] if nav_info else None),
         latest_nav_date=(nav_info["nav_date"] if nav_info else None),
         headline=str(parsed.get("headline", ""))[:200],
-        should_buy=bool(parsed.get("should_buy", False)),
+        should_buy=False if should_buy is None else should_buy,
         suggested_action=action,
         suggested_amount_rmb=amount_dec,
         reasoning=str(parsed.get("reasoning", ""))[:500],
