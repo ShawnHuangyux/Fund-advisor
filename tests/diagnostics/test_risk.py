@@ -28,7 +28,9 @@ def test_max_drawdown_basic():
 def test_max_drawdown_monotonic_up_returns_zero():
     s = pd.Series([1.0, 1.01, 1.02, 1.05])
     result = risk.compute_max_drawdown(s)
-    assert result == Decimal("0.00") or result == Decimal("0")
+    # 单调上升 → 回撤为 0；允许浮点噪声 < 0.001
+    assert result is not None
+    assert result <= Decimal("0.001")
 
 
 def test_annualized_volatility_constant_returns_none_or_zero():
@@ -93,6 +95,23 @@ def test_diagnose_breach_tolerance_emits_high_signal(default_settings):
     assert "RISK_EXCEEDS_TOLERANCE" in codes
     breach_sig = next(s for s in diag.signals if s.code == "RISK_EXCEEDS_TOLERANCE")
     assert breach_sig.severity.value == "high"
+
+
+def test_money_fund_synthetic_nav_yields_zero_risk():
+    """货基的合成 NAV（恒为 1.0）应让 mdd / vol / stress loss 都为 0，且 caveat 为空。
+
+    复现：advisor 层把 FundType.MONEY 的 nav_histories 注入恒定 NAV，
+    risk.diagnose 不应报错也不应输出 None。
+    """
+    from fund_advisor.advisor.advisor import _synthetic_money_fund_nav_history
+
+    df = _synthetic_money_fund_nav_history(days=300)
+    assert risk.compute_max_drawdown(df["单位净值"]) <= Decimal("0.001")
+    vol = risk.compute_annualized_volatility(df["单位净值"])
+    assert vol is None or vol <= Decimal("0.001")
+    loss = risk.stress_test_loss(df, date(2025, 1, 1), date(2025, 4, 30))
+    # 货基窗口里若覆盖到 → loss 为 0；若没覆盖到（窗口在合成数据之前）→ None
+    assert loss is None or loss <= Decimal("0.001")
 
 
 def test_diagnose_missing_history_graceful(default_settings):

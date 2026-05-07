@@ -48,6 +48,23 @@ except Exception:  # pragma: no cover - sqlite 理论上一定存在
     current_month_cost = None  # type: ignore
 
 
+def _synthetic_money_fund_nav_history(days: int = 800) -> pd.DataFrame:
+    """合成货基净值历史：每个工作日 NAV=1.0，日增长率=0。
+
+    避免 risk.diagnose 把货基标成 "data missing"，让最大回撤 / 波动 / 压力损失
+    都得到显式的 0，UI 上更清晰。
+    """
+    today = date.today()
+    rng = pd.bdate_range(end=today, periods=days)
+    return pd.DataFrame(
+        {
+            "净值日期": [d.date() for d in rng],
+            "单位净值": [1.0] * len(rng),
+            "日增长率": [0.0] * len(rng),
+        }
+    )
+
+
 def build_data_quality_report(
     portfolio: Portfolio, report: DiagnosisReport
 ) -> DataQualityReport:
@@ -261,7 +278,9 @@ def run_diagnosis(
     nav_histories: dict[str, pd.DataFrame] = {}
     for h in portfolio.holdings:
         if h.fund_type == FundType.MONEY:
-            nav_histories[h.code] = pd.DataFrame()
+            # 货基没有"单位净值走势"接口，akshare 拉到的会是噪声；
+            # 用合成的恒定净值（1.0）替代，让 risk.diagnose 的指标显式得 0 而不是 None。
+            nav_histories[h.code] = _synthetic_money_fund_nav_history()
             continue
         try:
             rows = get_nav_history(h.code, years=3)
