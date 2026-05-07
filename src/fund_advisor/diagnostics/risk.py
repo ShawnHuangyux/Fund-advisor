@@ -17,7 +17,6 @@ from __future__ import annotations
 import math
 from datetime import date
 from decimal import Decimal
-from typing import Any
 
 import pandas as pd
 
@@ -286,7 +285,3 @@ __all__: list[str] = [
     "stress_test_loss",
     "diagnose",
 ]
-
-
-# 用于类型检查器但不想强制的 Signal.detail 泛型
-_ = Any
